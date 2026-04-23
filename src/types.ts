@@ -8,7 +8,7 @@ export interface Vec2 { x: number; y: number }
 
 // --- Weapons ---
 
-export type WeaponType = 'knife' | 'katana' | 'pistol' | 'shotgun' | 'smg' | 'assault_rifle' | 'sniper';
+export type WeaponType = 'fists' | 'knife' | 'katana' | 'pistol' | 'shotgun' | 'smg' | 'assault_rifle' | 'sniper';
 
 export interface WeaponDef {
   type: WeaponType;
@@ -25,13 +25,14 @@ export interface WeaponDef {
 }
 
 export const WEAPON_DEFS: Record<WeaponType, WeaponDef> = {
+  fists:          { type: 'fists',          name: 'Pěsti',           damage: 10,  fireRate: 2.5,  range: 35,  maxAmmo: -1,  melee: true,  knockback: 3 },
   knife:          { type: 'knife',          name: 'Nůž',             damage: 30,  fireRate: 3.3,  range: 50,  maxAmmo: -1,  melee: true,  knockback: 5 },
   katana:         { type: 'katana',         name: 'Katana',          damage: 55,  fireRate: 1.6,  range: 80,  maxAmmo: -1,  melee: true,  knockback: 15 },
-  pistol:         { type: 'pistol',         name: 'Pistole',         damage: 15,  fireRate: 2.5,  range: 400, maxAmmo: -1,  melee: false, projectileSpeed: 700 },
-  shotgun:        { type: 'shotgun',        name: 'Brokovnice',      damage: 9,   fireRate: 1.2,  range: 220, maxAmmo: 24,  melee: false, projectileSpeed: 550, spread: 0.35, pellets: 6 },
-  smg:            { type: 'smg',            name: 'Samopal',         damage: 10,  fireRate: 10,   range: 320, maxAmmo: 120, melee: false, projectileSpeed: 600 },
-  assault_rifle:  { type: 'assault_rifle',  name: 'Útočná puška',    damage: 20,  fireRate: 5,    range: 500, maxAmmo: 60,  melee: false, projectileSpeed: 800 },
-  sniper:         { type: 'sniper',         name: 'Odstřelovačka',   damage: 80,  fireRate: 0.7,  range: 800, maxAmmo: 10,  melee: false, projectileSpeed: 1100 },
+  pistol:         { type: 'pistol',         name: 'Pistole',         damage: 15,  fireRate: 2.5,  range: 400, maxAmmo: 8,   melee: false, projectileSpeed: 700 },
+  shotgun:        { type: 'shotgun',        name: 'Brokovnice',      damage: 9,   fireRate: 1.2,  range: 220, maxAmmo: 6,   melee: false, projectileSpeed: 550, spread: 0.35, pellets: 6 },
+  smg:            { type: 'smg',            name: 'Samopal',         damage: 10,  fireRate: 10,   range: 320, maxAmmo: 30,  melee: false, projectileSpeed: 600 },
+  assault_rifle:  { type: 'assault_rifle',  name: 'Útočná puška',    damage: 20,  fireRate: 5,    range: 500, maxAmmo: 15,  melee: false, projectileSpeed: 800 },
+  sniper:         { type: 'sniper',         name: 'Odstřelovačka',   damage: 80,  fireRate: 0.7,  range: 800, maxAmmo: 3,   melee: false, projectileSpeed: 1100 },
 };
 
 // --- Player ---

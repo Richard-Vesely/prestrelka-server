@@ -150,9 +150,9 @@ export class Game {
       coins: 0,
       kills: 0,
       deaths: 0,
-      currentWeapon: 'pistol',
+      currentWeapon: 'fists',
       currentAmmo: -1,
-      inventory: [{ type: 'pistol', ammo: -1 }],
+      inventory: [{ type: 'fists', ammo: -1 }],
       alive: true,
       respawnTimer: 0,
       speedBoostTimer: 0,
@@ -690,9 +690,9 @@ export class Game {
     p.damageBoost = 0;
     p.regen = 0;
     p.speed = BASE_PLAYER_SPEED;
-    p.currentWeapon = 'pistol';
+    p.currentWeapon = 'fists';
     p.currentAmmo = -1;
-    p.inventory = [{ type: 'pistol', ammo: -1 }];
+    p.inventory = [{ type: 'fists', ammo: -1 }];
     p.respawnTimer = 0;
 
     this.emitCallback('playerRespawned', this.roomCode, null, {
@@ -954,17 +954,23 @@ export class Game {
         }
 
         if (pickup.type === 'weapon' && pickup.weaponType) {
-          const newSlot: InventorySlot = { type: pickup.weaponType, ammo: pickup.weaponAmmo ?? -1 };
+          const newSlot: InventorySlot = { type: pickup.weaponType, ammo: pickup.weaponAmmo ?? WEAPON_DEFS[pickup.weaponType].maxAmmo };
 
           if (p.inventory.length < MAX_INVENTORY_SLOTS) {
+            // Add to inventory and auto-switch to it
+            // Save current ammo first
+            const curIdx = p.inventory.findIndex(s => s.type === p.currentWeapon);
+            if (curIdx >= 0) p.inventory[curIdx].ammo = p.currentAmmo;
             p.inventory.push(newSlot);
+            p.currentWeapon = newSlot.type;
+            p.currentAmmo = newSlot.ammo;
           } else {
             // Swap current weapon
             const currentSlotIdx = p.inventory.findIndex(s => s.type === p.currentWeapon);
             if (currentSlotIdx >= 0) {
-              // Drop current weapon as pickup
+              // Drop current weapon as pickup (don't drop fists)
               const oldSlot = p.inventory[currentSlotIdx];
-              if (oldSlot.type !== 'pistol') {
+              if (oldSlot.type !== 'fists') {
                 this.spawnPickup({
                   id: this.nextPickupId++,
                   type: 'weapon',
