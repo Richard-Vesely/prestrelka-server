@@ -1,4 +1,4 @@
-import type { RoomInfo, LobbyPlayer } from './types.js';
+import type { RoomInfo, LobbyPlayer } from './shared/types.js';
 
 interface Room {
   code: string;

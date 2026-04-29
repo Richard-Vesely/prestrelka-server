@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "sync-shared": "bash scripts/sync-shared.sh",
+    "predev": "npm run sync-shared",
     "dev": "tsx watch src/index.ts",
+    "prebuild": "npm run sync-shared",
     "build": "tsc",
     "start": "node dist/index.js"
   },
