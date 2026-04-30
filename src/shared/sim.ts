@@ -1,7 +1,7 @@
 // =====================================================================
 // AUTO-GENERATED — DO NOT EDIT.
 // Source of truth: ardoremy_actually_website_github_repo/hry/shooter/
-// Re-sync: cd shooter-server && ./scripts/sync-shared.sh
+// Re-sync: cd shooter-server && node scripts/sync-shared.mjs
 // =====================================================================
 
 // Client-side game simulation — mirrors shooter-server/src/game.ts so the game

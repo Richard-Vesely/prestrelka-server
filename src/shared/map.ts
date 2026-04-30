@@ -1,7 +1,7 @@
 // =====================================================================
 // AUTO-GENERATED — DO NOT EDIT.
 // Source of truth: ardoremy_actually_website_github_repo/hry/shooter/
-// Re-sync: cd shooter-server && ./scripts/sync-shared.sh
+// Re-sync: cd shooter-server && node scripts/sync-shared.mjs
 // =====================================================================
 
 // Map generator — ported from shooter-server/src/map.ts so single-player mode works in-browser.
