@@ -139,6 +139,10 @@ export interface PlayerState {
   // durability). -1 = infinite/non-melee.
   currentDurability: number;
   inventory: InventorySlot[];
+  // Current per-player inventory cap. Starts at INITIAL_INVENTORY_SLOTS,
+  // grows when the player buys "Slot navíc" in the shop, hard-capped at
+  // MAX_INVENTORY_SLOTS so number-key bindings (1-9) stay valid.
+  inventorySlots: number;
   alive: boolean;
   respawnTimer: number;
   speedBoostTimer: number;
@@ -265,7 +269,7 @@ export interface MapData {
 // --- Shop ---
 
 export type StatUpgrade = 'maxHp' | 'speed' | 'armor' | 'damage' | 'regen';
-export type Consumable = 'speedBoost';
+export type Consumable = 'speedBoost' | 'buyInventorySlot';
 // Each weapon and each armor piece is also a buyable shop item — they share
 // the unified ShopItem union below.
 export type WeaponBuy =
@@ -319,13 +323,20 @@ export interface EquippedArmor {
   maxHp: number;
 }
 
+// Top-level shop categories. Used by the two-key shop UI (Q/W/E/R picks
+// a category, then 1-9 picks an item within it).
+export type ShopCategory = 'stats' | 'weapons' | 'armor' | 'items';
+
 export interface ShopItemDef {
   id: ShopItem;
   name: string;
   description: string;
+  // Soft cap for visual purposes; the only item that's actually capped at
+  // runtime is maxHp. costs[] flattens past the array end.
   maxTier: number;
   costs: number[];
   isConsumable: boolean;
+  category: ShopCategory;
   // Optional discriminators — set for shop entries that grant a weapon or
   // an armor piece when purchased. The sim's purchase handler routes on these.
   buyWeapon?: WeaponType;
@@ -337,30 +348,31 @@ export interface ShopItemDef {
 // bandage pickups instead. Weapons + armor are buyable here as an alternative
 // to scavenging boxes.
 export const SHOP_ITEMS: Record<ShopItem, ShopItemDef> = {
-  // ── Stat upgrades (flat costs per tier) ──────────────────
-  maxHp:        { id: 'maxHp',        name: 'Max HP',          description: '+20 HP',                         maxTier: 5, costs: [60, 60, 60, 60, 60],   isConsumable: false },
-  speed:        { id: 'speed',        name: 'Rychlost',        description: '+10 % rychlosti',                maxTier: 3, costs: [150, 150, 150],         isConsumable: false },
-  armor:        { id: 'armor',        name: 'Pasivní brnění',  description: '-15 % poškození',                maxTier: 3, costs: [250, 250, 250],         isConsumable: false },
-  damage:       { id: 'damage',       name: 'Poškození',       description: '+15 % poškození',                maxTier: 3, costs: [300, 300, 300],         isConsumable: false },
-  regen:        { id: 'regen',        name: 'Regenerace',      description: '+1 HP/s',                        maxTier: 3, costs: [200, 200, 200],         isConsumable: false },
+  // ── Stat upgrades (flat costs per tier; only maxHp has a hard cap) ──
+  maxHp:        { id: 'maxHp',        name: 'Max HP',          description: '+20 HP',                         maxTier: 5, costs: [60, 60, 60, 60, 60],   isConsumable: false, category: 'stats' },
+  speed:        { id: 'speed',        name: 'Rychlost',        description: '+10 % rychlosti',                maxTier: 3, costs: [150, 150, 150],         isConsumable: false, category: 'stats' },
+  armor:        { id: 'armor',        name: 'Pasivní brnění',  description: '-15 % poškození',                maxTier: 3, costs: [250, 250, 250],         isConsumable: false, category: 'stats' },
+  damage:       { id: 'damage',       name: 'Poškození',       description: '+15 % poškození',                maxTier: 3, costs: [300, 300, 300],         isConsumable: false, category: 'stats' },
+  regen:        { id: 'regen',        name: 'Regenerace',      description: '+1 HP/s',                        maxTier: 3, costs: [200, 200, 200],         isConsumable: false, category: 'stats' },
 
-  // ── Consumables ──────────────────────────────────────────
-  speedBoost:   { id: 'speedBoost',   name: 'Turbo',           description: '+50 % rychlost na 15 s',         maxTier: 1, costs: [60],                    isConsumable: true },
+  // ── Items / consumables ─────────────────────────────────
+  speedBoost:        { id: 'speedBoost',        name: 'Turbo',           description: '+50 % rychlost na 15 s',         maxTier: 1, costs: [60],   isConsumable: true,  category: 'items' },
+  buyInventorySlot:  { id: 'buyInventorySlot',  name: 'Slot navíc',      description: '+1 místo v inventáři',           maxTier: 1, costs: [150],  isConsumable: true,  category: 'items' },
 
   // ── Weapons (buy = add to inventory or refill ammo) ──────
-  buyPistol:         { id: 'buyPistol',         name: 'Koupit pistoli',     description: '+8 nábojů',          maxTier: 1, costs: [80],  isConsumable: true, buyWeapon: 'pistol' },
-  buyKnife:          { id: 'buyKnife',          name: 'Koupit nůž',         description: 'Trvanlivost 60',     maxTier: 1, costs: [100], isConsumable: true, buyWeapon: 'knife' },
-  buyShotgun:        { id: 'buyShotgun',        name: 'Koupit brokovnici',  description: '+6 nábojů',          maxTier: 1, costs: [200], isConsumable: true, buyWeapon: 'shotgun' },
-  buySmg:            { id: 'buySmg',            name: 'Koupit samopal',     description: '+30 nábojů',         maxTier: 1, costs: [200], isConsumable: true, buyWeapon: 'smg' },
-  buyKatana:         { id: 'buyKatana',         name: 'Koupit katanu',      description: 'Trvanlivost 150',    maxTier: 1, costs: [350], isConsumable: true, buyWeapon: 'katana' },
-  buyAssaultRifle:   { id: 'buyAssaultRifle',   name: 'Koupit puška',       description: '+15 nábojů',         maxTier: 1, costs: [350], isConsumable: true, buyWeapon: 'assault_rifle' },
-  buySniper:         { id: 'buySniper',         name: 'Koupit odstřelovačku', description: '+3 náboje',        maxTier: 1, costs: [400], isConsumable: true, buyWeapon: 'sniper' },
-  buyRocketLauncher: { id: 'buyRocketLauncher', name: 'Koupit raketomet',   description: '+2 náboje',          maxTier: 1, costs: [800], isConsumable: true, buyWeapon: 'rocket_launcher' },
+  buyPistol:         { id: 'buyPistol',         name: 'Koupit pistoli',     description: '+8 nábojů',          maxTier: 1, costs: [80],  isConsumable: true, category: 'weapons', buyWeapon: 'pistol' },
+  buyKnife:          { id: 'buyKnife',          name: 'Koupit nůž',         description: 'Trvanlivost 60',     maxTier: 1, costs: [100], isConsumable: true, category: 'weapons', buyWeapon: 'knife' },
+  buyShotgun:        { id: 'buyShotgun',        name: 'Koupit brokovnici',  description: '+6 nábojů',          maxTier: 1, costs: [200], isConsumable: true, category: 'weapons', buyWeapon: 'shotgun' },
+  buySmg:            { id: 'buySmg',            name: 'Koupit samopal',     description: '+30 nábojů',         maxTier: 1, costs: [200], isConsumable: true, category: 'weapons', buyWeapon: 'smg' },
+  buyKatana:         { id: 'buyKatana',         name: 'Koupit katanu',      description: 'Trvanlivost 150',    maxTier: 1, costs: [350], isConsumable: true, category: 'weapons', buyWeapon: 'katana' },
+  buyAssaultRifle:   { id: 'buyAssaultRifle',   name: 'Koupit puška',       description: '+15 nábojů',         maxTier: 1, costs: [350], isConsumable: true, category: 'weapons', buyWeapon: 'assault_rifle' },
+  buySniper:         { id: 'buySniper',         name: 'Koupit odstřelovačku', description: '+3 náboje',        maxTier: 1, costs: [400], isConsumable: true, category: 'weapons', buyWeapon: 'sniper' },
+  buyRocketLauncher: { id: 'buyRocketLauncher', name: 'Koupit raketomet',   description: '+2 náboje',          maxTier: 1, costs: [800], isConsumable: true, category: 'weapons', buyWeapon: 'rocket_launcher' },
 
   // ── Armor pieces (equipped in the armor slot, deplete on hit) ──
-  buyArmorClose:     { id: 'buyArmorClose',     name: 'Brnění zblízka',     description: 'Pohlcuje 60 % zásahu zblízka',  maxTier: 1, costs: [200], isConsumable: true, buyArmor: 'close' },
-  buyArmorLong:      { id: 'buyArmorLong',      name: 'Brnění zdálky',      description: 'Pohlcuje 60 % zásahu zdálky',   maxTier: 1, costs: [200], isConsumable: true, buyArmor: 'long' },
-  buyArmorUniversal: { id: 'buyArmorUniversal', name: 'Univerzální brnění', description: 'Pohlcuje 40 % každého zásahu',  maxTier: 1, costs: [400], isConsumable: true, buyArmor: 'universal' },
+  buyArmorClose:     { id: 'buyArmorClose',     name: 'Brnění zblízka',     description: 'Pohlcuje 60 % zásahu zblízka',  maxTier: 1, costs: [200], isConsumable: true, category: 'armor', buyArmor: 'close' },
+  buyArmorLong:      { id: 'buyArmorLong',      name: 'Brnění zdálky',      description: 'Pohlcuje 60 % zásahu zdálky',   maxTier: 1, costs: [200], isConsumable: true, category: 'armor', buyArmor: 'long' },
+  buyArmorUniversal: { id: 'buyArmorUniversal', name: 'Univerzální brnění', description: 'Pohlcuje 40 % každého zásahu',  maxTier: 1, costs: [400], isConsumable: true, category: 'armor', buyArmor: 'universal' },
 };
 
 // Display order in the shop overlay. Number keys 1..N map to this list.
@@ -368,12 +380,28 @@ export const SHOP_ITEMS: Record<ShopItem, ShopItemDef> = {
 export const SHOP_ITEM_ORDER: ShopItem[] = [
   // Stats first (most-bought passives)
   'maxHp', 'speed', 'armor', 'damage', 'regen',
-  // Consumable
-  'speedBoost',
+  // Items
+  'speedBoost', 'buyInventorySlot',
   // Weapons (cheapest → most expensive)
   'buyPistol', 'buyKnife', 'buyShotgun', 'buySmg', 'buyKatana', 'buyAssaultRifle', 'buySniper', 'buyRocketLauncher',
   // Armor pieces
   'buyArmorClose', 'buyArmorLong', 'buyArmorUniversal',
+];
+
+// Per-category ordered list (drives Q/W/E/R drill-down view).
+export const SHOP_CATEGORY_ORDER: Record<ShopCategory, ShopItem[]> = {
+  stats:   ['maxHp', 'speed', 'armor', 'damage', 'regen'],
+  items:   ['speedBoost', 'buyInventorySlot'],
+  weapons: ['buyPistol', 'buyKnife', 'buyShotgun', 'buySmg', 'buyKatana', 'buyAssaultRifle', 'buySniper', 'buyRocketLauncher'],
+  armor:   ['buyArmorClose', 'buyArmorLong', 'buyArmorUniversal'],
+};
+
+// Category list as it appears at the top level of the shop. Maps to Q/W/E/R.
+export const SHOP_CATEGORY_LIST: { category: ShopCategory; key: 'KeyQ' | 'KeyW' | 'KeyE' | 'KeyR'; keyLabel: string; name: string }[] = [
+  { category: 'stats',   key: 'KeyQ', keyLabel: 'Q', name: 'Statistiky' },
+  { category: 'weapons', key: 'KeyW', keyLabel: 'W', name: 'Zbraně' },
+  { category: 'armor',   key: 'KeyE', keyLabel: 'E', name: 'Brnění' },
+  { category: 'items',   key: 'KeyR', keyLabel: 'R', name: 'Předměty' },
 ];
 
 // --- NPC Definitions ---
@@ -468,7 +496,10 @@ export const SHIELD_POTION_DURATION = 30;
 export const HP_POTION_AMOUNT = 50;
 // 6 inventory slots = the original 4 + the two extra spots Richard asked for
 // (plus a separate equippedArmor field on PlayerState for the dedicated armor slot).
-export const MAX_INVENTORY_SLOTS = 6;
+// Hard ceiling — keyboard slots are 1-9, so 9 is the highest bindable slot.
+// Players start with INITIAL_INVENTORY_SLOTS and can buy more in the shop.
+export const MAX_INVENTORY_SLOTS = 9;
+export const INITIAL_INVENTORY_SLOTS = 6;
 export const COIN_LOSS_ON_DEATH = 0.5;
 
 // Loot box spawning: every BOX_SPAWN_INTERVAL seconds a box drops at a

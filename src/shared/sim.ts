@@ -20,7 +20,7 @@ import {
   PROJECTILE_RADIUS, BASE_PLAYER_HP, BASE_PLAYER_SPEED, RESPAWN_TIME,
   MAX_NPCS, NPC_RESPAWN_INTERVAL, SHOP_INTERACT_RADIUS,
   PICKUP_COLLECT_RADIUS, SPEED_BOOST_MULTIPLIER, SPEED_BOOST_DURATION,
-  MAX_INVENTORY_SLOTS, COIN_LOSS_ON_DEATH, PICKUP_RADIUS, SKILL_DEFS,
+  MAX_INVENTORY_SLOTS, INITIAL_INVENTORY_SLOTS, COIN_LOSS_ON_DEATH, PICKUP_RADIUS, SKILL_DEFS,
   BOX_LOOT_TABLE, BOX_SPAWN_INTERVAL, MAX_PICKUP_BOXES, BANDAGE_HEAL_AMOUNT,
   BANDAGE_USE_COOLDOWN, BLOCK_SPEED_MULTIPLIER, ARMOR_PIECES,
 } from './types.js';
@@ -220,6 +220,7 @@ export class Sim {
         { type: 'fists', ammo: -1, durability: -1 },
         { type: 'pistol', ammo: pistolDef.maxAmmo },
       ],
+      inventorySlots: INITIAL_INVENTORY_SLOTS,
       alive: true,
       respawnTimer: 0,
       speedBoostTimer: 0,
@@ -361,17 +362,25 @@ export class Sim {
         this.emitCallback('purchaseFailed', playerId, { reason: 'Nemáš dost mincí' });
         return;
       }
+      // buyInventorySlot is the only consumable that can hard-fail post-charge —
+      // refuse if the player is already at the keyboard-bindable ceiling.
+      if (item === 'buyInventorySlot' && p.inventorySlots >= MAX_INVENTORY_SLOTS) {
+        this.emitCallback('purchaseFailed', playerId, { reason: 'Maximální velikost inventáře' });
+        return;
+      }
       p.coins -= cost;
       this.applyConsumable(p, item);
       this.emitCallback('purchaseSuccess', playerId, { item, cost, tier: 1 });
     } else {
       const upgrade = item as StatUpgrade;
       const currentTier = p.upgrades[upgrade];
-      if (currentTier >= def.maxTier) {
+      // Only maxHp keeps a hard cap; other stats can be purchased indefinitely.
+      // Cost flatlines at the last entry of `costs` past the original tier table.
+      if (upgrade === 'maxHp' && currentTier >= def.maxTier) {
         this.emitCallback('purchaseFailed', playerId, { reason: 'Maximální úroveň' });
         return;
       }
-      const cost = def.costs[currentTier];
+      const cost = def.costs[currentTier] ?? def.costs[def.costs.length - 1];
       if (p.coins < cost) {
         this.emitCallback('purchaseFailed', playerId, { reason: 'Nemáš dost mincí' });
         return;
@@ -385,10 +394,12 @@ export class Sim {
 
   private applyConsumable(p: PlayerState, item: ShopItem): void {
     // hpPotion / shieldPotion were removed from the shop — heals come from
-    // bandage pickups / pickup drops now. Only speedBoost remains as a
-    // one-off consumable purchase.
+    // bandage pickups / pickup drops now. speedBoost and buyInventorySlot
+    // are the current one-off purchases.
     if (item === 'speedBoost') {
       p.speedBoostTimer = SPEED_BOOST_DURATION;
+    } else if (item === 'buyInventorySlot') {
+      if (p.inventorySlots < MAX_INVENTORY_SLOTS) p.inventorySlots++;
     }
   }
 
@@ -1024,9 +1035,13 @@ export class Sim {
       }
     }
 
-    // 2. Passive armor stat + resilience skill
+    // 2. Passive armor stat + resilience skill. Each multiplier clamped at
+     // 0.05 so unbounded stat purchases / skill levels never flip damage to
+     // negative (which would heal the target). Combined damage floor: 0.0025x.
     const resilience = (target.skills.resilience ?? 0) * SKILL_DEFS.resilience.perTier;
-    dmg = dmg * (1 - target.armor) * (1 - resilience);
+    const armorMul = Math.max(0.05, 1 - target.armor);
+    const resilMul = Math.max(0.05, 1 - resilience);
+    dmg = dmg * armorMul * resilMul;
 
     // 3. Equipped armor piece — absorbs portion of matching-type damage.
     if (target.equippedArmor && target.equippedArmor.hp > 0) {
@@ -1277,7 +1292,7 @@ export class Sim {
     }
 
     // New slot
-    const cap = MAX_INVENTORY_SLOTS;
+    const cap = p.inventorySlots;
     const newSlot: InventorySlot = wDef.melee
       ? { type: weapon, ammo: -1, durability: wDef.meleeHp ?? -1 }
       : { type: weapon, ammo: wDef.maxAmmo };
@@ -1557,7 +1572,7 @@ export class Sim {
             this.emitCallback('pickupCollected', null, { pickupId, playerId: p.id });
             break;
           }
-          if (p.inventory.length < MAX_INVENTORY_SLOTS) {
+          if (p.inventory.length < p.inventorySlots) {
             p.inventory.push({ type: 'bandage', ammo: dose });
             collected.push(pickupId);
             this.emitCallback('pickupCollected', null, { pickupId, playerId: p.id });
@@ -1593,7 +1608,7 @@ export class Sim {
             ? { type: pickup.weaponType, ammo: -1, durability: wDef.meleeHp ?? -1 }
             : { type: pickup.weaponType, ammo: pickup.weaponAmmo ?? wDef.maxAmmo };
 
-          if (p.inventory.length < MAX_INVENTORY_SLOTS) {
+          if (p.inventory.length < p.inventorySlots) {
             // Persist current weapon state before pushing the new slot.
             const curIdx = p.inventory.findIndex(s => s.type === p.currentWeapon);
             if (curIdx >= 0) {
