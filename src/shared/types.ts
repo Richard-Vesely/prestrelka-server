@@ -214,6 +214,10 @@ export interface Pickup {
   y: number;
   weaponType?: WeaponType;
   weaponAmmo?: number;
+  // Melee durability carried by the pickup (only set when a melee weapon was
+  // dropped by a player). Lets a dropped katana/knife keep its used-up state
+  // instead of resetting to full when picked back up.
+  weaponDurability?: number;
   coinAmount?: number;
   bandageHeal?: number;
 }

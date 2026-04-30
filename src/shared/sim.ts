@@ -471,8 +471,9 @@ export class Sim {
   }
 
   // Drop the currently-wielded slot as a pickup near the player. Fists are
-  // not droppable. Bandages drop as a single bandage pickup carrying all the
-  // remaining doses; weapons drop with a full mag (mirrors the death-drop).
+  // not droppable. Bandages drop carrying all remaining doses. Melee weapons
+  // drop with their current durability (no reset). Ranged weapons drop with
+  // their current ammo — and if ammo is 0, the slot just vanishes (no pickup).
   dropCurrent(playerId: string): void {
     const p = this.players.get(playerId);
     if (!p || !p.alive) return;
@@ -490,7 +491,7 @@ export class Sim {
     const dropY = p.y + Math.sin(dropAngle) * dropDist;
 
     if (p.currentWeapon === 'bandage') {
-      const doses = Math.max(0, slot.ammo);
+      const doses = Math.max(0, p.currentAmmo);
       if (doses > 0) {
         this.spawnPickup({
           id: this.nextPickupId++,
@@ -502,14 +503,34 @@ export class Sim {
       }
     } else {
       const wDef = WEAPON_DEFS[p.currentWeapon];
-      this.spawnPickup({
-        id: this.nextPickupId++,
-        type: 'weapon',
-        x: dropX,
-        y: dropY,
-        weaponType: p.currentWeapon,
-        weaponAmmo: wDef.maxAmmo,
-      });
+      if (wDef.melee) {
+        // Carry current durability so a partly-broken katana stays partly-broken.
+        const dur = p.currentDurability >= 0 ? p.currentDurability : (slot.durability ?? wDef.meleeHp ?? -1);
+        // Don't drop a fully-broken melee weapon — it'd be useless on the ground.
+        if (dur > 0 || dur === -1) {
+          this.spawnPickup({
+            id: this.nextPickupId++,
+            type: 'weapon',
+            x: dropX,
+            y: dropY,
+            weaponType: p.currentWeapon,
+            weaponDurability: dur,
+          });
+        }
+      } else {
+        // Ranged: drop with current ammo. Empty guns vanish — no pickup.
+        const ammo = p.currentAmmo;
+        if (ammo > 0) {
+          this.spawnPickup({
+            id: this.nextPickupId++,
+            type: 'weapon',
+            x: dropX,
+            y: dropY,
+            weaponType: p.currentWeapon,
+            weaponAmmo: ammo,
+          });
+        }
+      }
     }
 
     p.inventory.splice(slotIdx, 1);
@@ -745,7 +766,14 @@ export class Sim {
       } else if (p.currentAmmo > 0) {
         p.currentAmmo--;
         const slot = p.inventory.findIndex(s => s.type === p.currentWeapon);
-        if (slot >= 0) p.inventory[slot].ammo = p.currentAmmo;
+        if (slot >= 0) {
+          p.inventory[slot].ammo = p.currentAmmo;
+          // Empty guns vanish from inventory — no point holding a useless slot.
+          if (p.currentAmmo <= 0) {
+            p.inventory.splice(slot, 1);
+            this.equipFists(p);
+          }
+        }
       }
 
       // Notify renderer (muzzle flash + recoil) via event
@@ -1100,19 +1128,34 @@ export class Sim {
     victim.respawnTimer = RESPAWN_TIME;
     victim.deaths++;
 
-    // Drop the victim's weapon with a full magazine — the kill is the reward,
-    // not whatever ammo the victim had left when they died. Fists and bandages
-    // aren't dropped (fists are universal; bandages would feel cheap).
+    // Drop the victim's currently-wielded weapon, preserving its used-up state.
+    // Empty guns vanish (no pickup). Fully-broken melee weapons vanish too.
+    // Fists and bandages aren't dropped (fists are universal; bandages would
+    // feel cheap as a kill reward).
     if (victim.currentWeapon !== 'fists' && victim.currentWeapon !== 'bandage') {
       const dropDef = WEAPON_DEFS[victim.currentWeapon];
-      this.spawnPickup({
-        id: this.nextPickupId++,
-        type: 'weapon',
-        x: victim.x + randomInRange(-20, 20),
-        y: victim.y + randomInRange(-20, 20),
-        weaponType: victim.currentWeapon,
-        weaponAmmo: dropDef.maxAmmo,
-      });
+      const dropX = victim.x + randomInRange(-20, 20);
+      const dropY = victim.y + randomInRange(-20, 20);
+      if (dropDef.melee) {
+        const dur = victim.currentDurability;
+        if (dur > 0 || dur === -1) {
+          this.spawnPickup({
+            id: this.nextPickupId++,
+            type: 'weapon',
+            x: dropX, y: dropY,
+            weaponType: victim.currentWeapon,
+            weaponDurability: dur,
+          });
+        }
+      } else if (victim.currentAmmo > 0) {
+        this.spawnPickup({
+          id: this.nextPickupId++,
+          type: 'weapon',
+          x: dropX, y: dropY,
+          weaponType: victim.currentWeapon,
+          weaponAmmo: victim.currentAmmo,
+        });
+      }
     }
 
     const droppedCoins = Math.floor(victim.coins * COIN_LOSS_ON_DEATH);
@@ -1585,14 +1628,20 @@ export class Sim {
         if (pickup.type === 'weapon' && pickup.weaponType) {
           const wDef = WEAPON_DEFS[pickup.weaponType];
 
-          // Already own this weapon? Stack ammo (no cap) or refill durability.
+          // Already own this weapon? Stack ammo (no cap) or sum durability.
           const dupIdx = p.inventory.findIndex(s => s.type === pickup.weaponType);
           if (dupIdx >= 0) {
             if (wDef.melee) {
-              // Melee pickup restores durability to full.
+              // Melee pickup adds its carried durability to whatever's left,
+              // capped at the weapon's full meleeHp. Player-dropped pickups
+              // carry their used-up durability; box-spawned pickups (no
+              // weaponDurability set) come fresh, full HP.
               const fullHp = wDef.meleeHp ?? -1;
-              p.inventory[dupIdx].durability = fullHp;
-              if (p.currentWeapon === pickup.weaponType) p.currentDurability = fullHp;
+              const carried = pickup.weaponDurability ?? fullHp;
+              const live = p.currentWeapon === pickup.weaponType ? p.currentDurability : (p.inventory[dupIdx].durability ?? fullHp);
+              const next = fullHp === -1 ? -1 : Math.min(fullHp, Math.max(0, live) + Math.max(0, carried));
+              p.inventory[dupIdx].durability = next;
+              if (p.currentWeapon === pickup.weaponType) p.currentDurability = next;
             } else {
               const stacked = (p.currentWeapon === pickup.weaponType ? p.currentAmmo : p.inventory[dupIdx].ammo) + (pickup.weaponAmmo ?? wDef.maxAmmo);
               p.inventory[dupIdx].ammo = stacked;
@@ -1603,9 +1652,11 @@ export class Sim {
             break;
           }
 
-          // New weapon — take an empty slot or replace the held one.
+          // New weapon — take an empty slot or replace the held one. Use the
+          // pickup's carried durability/ammo so a dropped katana keeps its
+          // damage when picked back up.
           const newSlot: InventorySlot = wDef.melee
-            ? { type: pickup.weaponType, ammo: -1, durability: wDef.meleeHp ?? -1 }
+            ? { type: pickup.weaponType, ammo: -1, durability: pickup.weaponDurability ?? wDef.meleeHp ?? -1 }
             : { type: pickup.weaponType, ammo: pickup.weaponAmmo ?? wDef.maxAmmo };
 
           if (p.inventory.length < p.inventorySlots) {
