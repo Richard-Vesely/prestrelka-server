@@ -158,6 +158,10 @@ export class Sim {
   private npcWanderDir = new Map<number, Vec2>();
   private npcWanderTimer = new Map<number, number>();
   private playerNearShop = new Map<string, Set<number>>();
+  // Closest weapon pickup that doesn't fit a player's inventory and is in
+  // F-swap range. -1 means no in-range unfittable pickup. Used to drive the
+  // 'nearPickup' event so the client can show "F vyměnit".
+  private playerNearPickup = new Map<string, number>();
 
   // Per-player hit flashes (for renderer)
   hitFlashes = new Map<string, number>();
@@ -468,6 +472,88 @@ export class Sim {
     if (!p || !p.alive) return;
     if (slot < 0 || slot >= p.inventory.length) return;
     this.equipSlot(p, slot);
+  }
+
+  // Toggle lock on the currently-equipped slot. Locked slots can't be
+  // implicitly swapped out via F-swap; the player must switch to an unlocked
+  // slot first. Fists can't be locked (it's a free reset, not real inventory).
+  toggleLock(playerId: string): void {
+    const p = this.players.get(playerId);
+    if (!p || !p.alive) return;
+    if (p.currentWeapon === 'fists') return;
+    const slotIdx = p.inventory.findIndex(s => s.type === p.currentWeapon);
+    if (slotIdx < 0) return;
+    p.inventory[slotIdx].locked = !p.inventory[slotIdx].locked;
+  }
+
+  // F-swap: replace the currently-equipped slot with the player's near
+  // pickup. Refuses if the held slot is locked or is fists. Drops the held
+  // weapon as a pickup using the same durability/ammo-preservation rules.
+  swapPickup(playerId: string): void {
+    const p = this.players.get(playerId);
+    if (!p || !p.alive) return;
+    const pickupId = this.playerNearPickup.get(p.id) ?? -1;
+    if (pickupId < 0) return;
+    const pickup = this.pickups.get(pickupId);
+    if (!pickup || pickup.type !== 'weapon' || !pickup.weaponType) return;
+    // Re-check distance — the player may have walked away since the last tick.
+    if (dist(p, pickup) > PICKUP_COLLECT_RADIUS + PICKUP_RADIUS) return;
+
+    if (p.currentWeapon === 'fists') {
+      this.emitCallback('purchaseFailed', p.id, { reason: 'Vyber slot pro výměnu (1-9)' });
+      return;
+    }
+    const heldIdx = p.inventory.findIndex(s => s.type === p.currentWeapon);
+    if (heldIdx < 0) return;
+    const heldSlot = p.inventory[heldIdx];
+    if (heldSlot.locked) {
+      this.emitCallback('purchaseFailed', p.id, { reason: 'Slot je zamčený' });
+      return;
+    }
+
+    // Drop the held slot as a pickup using the same rules as dropCurrent.
+    const dropAngle = Math.random() * Math.PI * 2;
+    const dropDist = 70;
+    const dropX = p.x + Math.cos(dropAngle) * dropDist;
+    const dropY = p.y + Math.sin(dropAngle) * dropDist;
+    const heldDef = WEAPON_DEFS[heldSlot.type as WeaponType];
+    if (heldDef) {
+      if (heldDef.melee) {
+        const dur = p.currentDurability;
+        if (dur > 0 || dur === -1) {
+          this.spawnPickup({
+            id: this.nextPickupId++,
+            type: 'weapon',
+            x: dropX, y: dropY,
+            weaponType: heldSlot.type as WeaponType,
+            weaponDurability: dur,
+          });
+        }
+      } else if (p.currentAmmo > 0) {
+        this.spawnPickup({
+          id: this.nextPickupId++,
+          type: 'weapon',
+          x: dropX, y: dropY,
+          weaponType: heldSlot.type as WeaponType,
+          weaponAmmo: p.currentAmmo,
+        });
+      }
+    }
+
+    // Replace the held slot in-place with the new pickup's contents.
+    const wDef = WEAPON_DEFS[pickup.weaponType];
+    const newSlot: InventorySlot = wDef.melee
+      ? { type: pickup.weaponType, ammo: -1, durability: pickup.weaponDurability ?? wDef.meleeHp ?? -1 }
+      : { type: pickup.weaponType, ammo: pickup.weaponAmmo ?? wDef.maxAmmo };
+    p.inventory[heldIdx] = newSlot;
+    p.currentWeapon = newSlot.type;
+    p.currentAmmo = newSlot.ammo;
+    p.currentDurability = newSlot.durability ?? -1;
+
+    this.pickups.delete(pickupId);
+    this.playerNearPickup.set(p.id, -1);
+    this.emitCallback('pickupCollected', null, { pickupId, playerId: p.id });
+    this.emitCallback('nearPickup', p.id, { pickupId: -1 });
   }
 
   // Drop the currently-wielded slot as a pickup near the player. Fists are
@@ -1586,6 +1672,8 @@ export class Sim {
 
   private processPickups(): void {
     const collected: number[] = [];
+    // Per-player closest in-range pickup that doesn't fit. Drives nearPickup.
+    const nearestUnfittable = new Map<string, { pickupId: number; distSq: number }>();
 
     for (const [pickupId, pickup] of this.pickups) {
       for (const [, p] of this.players) {
@@ -1670,35 +1758,33 @@ export class Sim {
             }
             p.inventory.push(newSlot);
             this.equipSlot(p, p.inventory.length - 1);
-          } else {
-            const currentSlotIdx = p.inventory.findIndex(s => s.type === p.currentWeapon);
-            if (currentSlotIdx >= 0) {
-              const oldSlot = p.inventory[currentSlotIdx];
-              if (oldSlot.type !== 'fists' && oldSlot.type !== 'bandage') {
-                // Drop the swapped weapon outside this player's pickup radius
-                // to avoid re-collecting it on the same tick.
-                const dropAngle = Math.random() * Math.PI * 2;
-                const dropDist = 70;
-                this.spawnPickup({
-                  id: this.nextPickupId++,
-                  type: 'weapon',
-                  x: p.x + Math.cos(dropAngle) * dropDist,
-                  y: p.y + Math.sin(dropAngle) * dropDist,
-                  weaponType: oldSlot.type,
-                  weaponAmmo: oldSlot.ammo,
-                });
-              }
-              p.inventory[currentSlotIdx] = newSlot;
-              p.currentWeapon = newSlot.type;
-              p.currentAmmo = newSlot.ammo;
-              p.currentDurability = newSlot.durability ?? -1;
-            }
+            collected.push(pickupId);
+            this.emitCallback('pickupCollected', null, { pickupId, playerId: p.id });
+            break;
           }
-
-          collected.push(pickupId);
-          this.emitCallback('pickupCollected', null, { pickupId, playerId: p.id });
-          break;
+          // Inventory full — defer to a manual F-swap. Track this pickup as
+          // the player's "near pickup" so the client can prompt. Don't break:
+          // other nearby players might also want to see the prompt.
+          const dx = pickup.x - p.x;
+          const dy = pickup.y - p.y;
+          const distSq = dx * dx + dy * dy;
+          const cur = nearestUnfittable.get(p.id);
+          if (!cur || distSq < cur.distSq) {
+            nearestUnfittable.set(p.id, { pickupId, distSq });
+          }
+          // Continue to next player — pickup stays for F-swap.
         }
+      }
+    }
+
+    // Emit nearPickup whenever the closest in-range unfittable pickup changes.
+    for (const [, p] of this.players) {
+      if (!p.alive) continue;
+      const nearest = nearestUnfittable.get(p.id)?.pickupId ?? -1;
+      const prev = this.playerNearPickup.get(p.id) ?? -1;
+      if (prev !== nearest) {
+        this.playerNearPickup.set(p.id, nearest);
+        this.emitCallback('nearPickup', p.id, { pickupId: nearest });
       }
     }
 

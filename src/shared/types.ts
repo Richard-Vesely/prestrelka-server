@@ -168,6 +168,9 @@ export interface InventorySlot {
   ammo: number;
   // Current melee durability. Only set for melee slots; -1 = infinite (fists).
   durability?: number;
+  // True if the player has locked the slot with B. Locked slots are skipped
+  // when picking what to overwrite during a forced inventory swap.
+  locked?: boolean;
 }
 
 // --- NPC ---
@@ -631,6 +634,9 @@ export interface PlayerInput {
 export const C2S_EVENTS = [
   'createRoom', 'joinRoom', 'playerReady', 'startGame', 'leaveRoom',
   'input', 'purchase', 'switchWeapon', 'spendSkill', 'dropWeapon',
+  // B toggles lock on the currently-equipped slot. F asks the server to
+  // swap the closest in-range pickup with the held slot when inventory's full.
+  'toggleLock', 'swapPickup',
 ] as const;
 
 // Server -> Client
@@ -639,7 +645,7 @@ export const S2C_EVENTS = [
   'gameStart', 'gameState', 'gameOver',
   'playerKilled', 'playerRespawned',
   'pickupCollected', 'purchaseSuccess', 'purchaseFailed',
-  'nearShop', 'levelUp',
+  'nearShop', 'nearPickup', 'levelUp',
   // Local-sim-only effect events (also safe for future server use):
   'weaponFired', 'projectileHitWall', 'damageDealt', 'hitConfirmed', 'npcKilled',
   'explosion',
@@ -660,6 +666,8 @@ export interface C2S {
   switchWeapon: { slot: number };
   spendSkill: { skill: SkillType };
   dropWeapon: Record<string, never>;
+  toggleLock: Record<string, never>;
+  swapPickup: Record<string, never>;
 }
 
 export interface S2C {
@@ -678,6 +686,9 @@ export interface S2C {
   purchaseSuccess: { item: ShopItem; cost: number; tier: number };
   purchaseFailed: { reason: string };
   nearShop: { shopId: number; near: boolean };
+  // Sent when the player walks within F-swap range of a pickup that doesn't
+  // fit their inventory. -1 in pickupId means "no pickup currently in range".
+  nearPickup: { pickupId: number };
   levelUp: { id: string; level: number };
   weaponFired: { playerId: string; weapon: WeaponType; x: number; y: number; angle: number };
   projectileHitWall: { x: number; y: number; angle: number };

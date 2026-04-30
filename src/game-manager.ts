@@ -83,6 +83,12 @@ export class GameManager {
   dropWeapon(roomCode: string, playerId: string): void {
     this.sims.get(roomCode)?.dropCurrent(playerId);
   }
+  toggleLock(roomCode: string, playerId: string): void {
+    this.sims.get(roomCode)?.toggleLock(playerId);
+  }
+  swapPickup(roomCode: string, playerId: string): void {
+    this.sims.get(roomCode)?.swapPickup(playerId);
+  }
   removePlayer(roomCode: string, playerId: string): void {
     this.sims.get(roomCode)?.removePlayer(playerId);
   }

@@ -104,6 +104,16 @@ io.on('connection', (socket) => {
     if (code) games.dropWeapon(code, socket.id);
   });
 
+  socket.on('toggleLock', () => {
+    const code = lobby.getRoomCodeByPlayer(socket.id);
+    if (code) games.toggleLock(code, socket.id);
+  });
+
+  socket.on('swapPickup', () => {
+    const code = lobby.getRoomCodeByPlayer(socket.id);
+    if (code) games.swapPickup(code, socket.id);
+  });
+
   socket.on('leaveRoom', () => handleLeave(socket.id));
   socket.on('disconnect', () => {
     console.log(`[disconnect] ${socket.id}`);
