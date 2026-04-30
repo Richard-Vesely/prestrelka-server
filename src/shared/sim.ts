@@ -427,6 +427,9 @@ export class Sim {
   }
 
   // Public method invoked from network adapter when the player buys a skill.
+  // Skills no longer have a cap — every level is one point and you can pour
+  // them all into the same skill if you want. perTier multipliers stack
+  // linearly so the math keeps making sense at high tiers.
   spendSkillPoint(playerId: string, skill: SkillType): void {
     const p = this.players.get(playerId);
     if (!p || !p.alive) return;
@@ -434,7 +437,6 @@ export class Sim {
     const def = SKILL_DEFS[skill];
     if (!def) return;
     const current = p.skills[skill] ?? 0;
-    if (current >= def.maxTier) return;
     p.skills[skill] = current + 1;
     p.skillPoints--;
     this.recalcStats(p);
@@ -1375,7 +1377,9 @@ export class Sim {
 
   private giveXP(player: PlayerState, amount: number): void {
     player.xp += amount;
-    while (player.level < XP_PER_LEVEL.length && player.xp >= player.xpToNext) {
+    // No level cap. Beyond the predefined XP_PER_LEVEL table the threshold
+    // doubles each level, so progression slows naturally at high tiers.
+    while (player.xp >= player.xpToNext) {
       player.xp -= player.xpToNext;
       player.level++;
       player.xpToNext = XP_PER_LEVEL[player.level] ?? player.xpToNext * 2;
