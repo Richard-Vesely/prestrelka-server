@@ -403,12 +403,13 @@ export const SHOP_CATEGORY_ORDER: Record<ShopCategory, ShopItem[]> = {
   armor:   ['buyArmorClose', 'buyArmorLong', 'buyArmorUniversal'],
 };
 
-// Category list as it appears at the top level of the shop. Maps to Q/W/E/R.
-export const SHOP_CATEGORY_LIST: { category: ShopCategory; key: 'KeyQ' | 'KeyW' | 'KeyE' | 'KeyR'; keyLabel: string; name: string }[] = [
-  { category: 'stats',   key: 'KeyQ', keyLabel: 'Q', name: 'Statistiky' },
-  { category: 'weapons', key: 'KeyW', keyLabel: 'W', name: 'Zbraně' },
-  { category: 'armor',   key: 'KeyE', keyLabel: 'E', name: 'Brnění' },
-  { category: 'items',   key: 'KeyR', keyLabel: 'R', name: 'Předměty' },
+// Category list as it appears in the shop HUD. Mapped to number keys 1-4 so
+// they don't collide with E (the shop open/close key) or with WASD movement.
+export const SHOP_CATEGORY_LIST: { category: ShopCategory; key: string; keyLabel: string; name: string }[] = [
+  { category: 'stats',   key: 'Digit1', keyLabel: '1', name: 'Statistiky' },
+  { category: 'weapons', key: 'Digit2', keyLabel: '2', name: 'Zbraně' },
+  { category: 'armor',   key: 'Digit3', keyLabel: '3', name: 'Brnění' },
+  { category: 'items',   key: 'Digit4', keyLabel: '4', name: 'Předměty' },
 ];
 
 // --- NPC Definitions ---
@@ -613,6 +614,10 @@ export interface RoomInfo {
   players: LobbyPlayer[];
   maxPlayers: number;
   started: boolean;
+  // Currently-selected mode for the waiting room. Anyone can change it via
+  // updateRoomSettings before startGame fires; the server broadcasts the new
+  // value on roomUpdated.
+  mode: GameModeConfig;
 }
 
 // --- Input ---
@@ -633,6 +638,7 @@ export interface PlayerInput {
 // Client -> Server
 export const C2S_EVENTS = [
   'createRoom', 'joinRoom', 'playerReady', 'startGame', 'leaveRoom',
+  'updateRoomSettings',
   'input', 'purchase', 'switchWeapon', 'spendSkill', 'dropWeapon',
   // B toggles lock on the currently-equipped slot. F asks the server to
   // swap the closest in-range pickup with the held slot when inventory's full.
@@ -656,10 +662,11 @@ export type S2CEventName = typeof S2C_EVENTS[number];
 
 // Event payload types
 export interface C2S {
-  createRoom: { name: string };
+  createRoom: { name: string; mode?: GameModeConfig };
   joinRoom: { code: string; name: string };
   playerReady: {};
   startGame: {};
+  updateRoomSettings: { mode: GameModeConfig };
   leaveRoom: {};
   input: PlayerInput;
   purchase: { item: ShopItem };

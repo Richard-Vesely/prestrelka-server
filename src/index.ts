@@ -36,7 +36,7 @@ io.on('connection', (socket) => {
 
   socket.on('createRoom', (data: C2S['createRoom']) => {
     const name = (data?.name ?? '').trim().slice(0, 20) || 'Hráč';
-    const room = lobby.createRoom(socket.id, name);
+    const room = lobby.createRoom(socket.id, name, data?.mode);
     socket.join(room.code);
     socket.emit('roomCreated', room satisfies S2C['roomCreated']);
   });
@@ -63,6 +63,12 @@ io.on('connection', (socket) => {
     if (room) io.to(room.code).emit('roomUpdated', room satisfies S2C['roomUpdated']);
   });
 
+  socket.on('updateRoomSettings', (data: C2S['updateRoomSettings']) => {
+    if (!data?.mode) return;
+    const room = lobby.setMode(socket.id, data.mode);
+    if (room) io.to(room.code).emit('roomUpdated', room satisfies S2C['roomUpdated']);
+  });
+
   socket.on('startGame', (data?: { mode?: GameModeConfig }) => {
     const roomCode = lobby.getRoomCodeByPlayer(socket.id);
     if (!roomCode) {
@@ -74,7 +80,10 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: 'Nemůžeš spustit hru' } satisfies S2C['error']);
       return;
     }
-    games.startGame(roomCode, result.players, data?.mode);
+    // The mode stored on the room (kept in sync via updateRoomSettings) is
+    // authoritative. A mode sent with startGame still wins as a fallback for
+    // older clients.
+    games.startGame(roomCode, result.players, data?.mode ?? result.mode);
   });
 
   // ── Gameplay (members → server) ──────────────────────────

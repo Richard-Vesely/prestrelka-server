@@ -1,4 +1,5 @@
-import type { RoomInfo, LobbyPlayer } from './shared/types.js';
+import type { RoomInfo, LobbyPlayer, GameModeConfig } from './shared/types.js';
+import { GAME_MODE_DEFAULTS } from './shared/types.js';
 
 interface Room {
   code: string;
@@ -6,6 +7,7 @@ interface Room {
   players: Map<string, LobbyPlayer>;
   maxPlayers: number;
   started: boolean;
+  mode: GameModeConfig;
 }
 
 const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // no I, O to avoid confusion
@@ -17,7 +19,7 @@ export class Lobby {
   private generateCode(): string {
     for (let attempt = 0; attempt < 100; attempt++) {
       let code = '';
-      for (let i = 0; i < 4; i++) {
+      for (let i = 0; i < 3; i++) {
         code += CHARS[Math.floor(Math.random() * CHARS.length)];
       }
       if (!this.rooms.has(code)) return code;
@@ -25,7 +27,7 @@ export class Lobby {
     throw new Error('Could not generate unique room code');
   }
 
-  createRoom(hostId: string, hostName: string): RoomInfo {
+  createRoom(hostId: string, hostName: string, initialMode?: GameModeConfig): RoomInfo {
     // Leave any existing room first
     this.leaveRoom(hostId);
 
@@ -37,6 +39,7 @@ export class Lobby {
       players: new Map([[hostId, host]]),
       maxPlayers: 10,
       started: false,
+      mode: initialMode ?? GAME_MODE_DEFAULTS.massacre,
     };
     this.rooms.set(code, room);
     this.playerToRoom.set(hostId, code);
@@ -96,14 +99,25 @@ export class Lobby {
     return this.toRoomInfo(room);
   }
 
-  startGame(roomCode: string, requesterId: string): { players: LobbyPlayer[] } | null {
+  // Update room settings — currently just the game mode. Anyone in the room
+  // can change it (matches Tank Battle's "first-come" approach); the new
+  // value is broadcast via roomUpdated.
+  setMode(playerId: string, mode: GameModeConfig): RoomInfo | null {
+    const room = this.getRoomByPlayer(playerId);
+    if (!room) return null;
+    if (room.started) return null;
+    room.mode = mode;
+    return this.toRoomInfo(room);
+  }
+
+  startGame(roomCode: string, requesterId: string): { players: LobbyPlayer[]; mode: GameModeConfig } | null {
     const room = this.rooms.get(roomCode);
     if (!room) return null;
     if (room.hostId !== requesterId) return null;
     if (room.started) return null;
 
     room.started = true;
-    return { players: Array.from(room.players.values()) };
+    return { players: Array.from(room.players.values()), mode: room.mode };
   }
 
   getRoom(code: string): Room | undefined {
@@ -127,6 +141,7 @@ export class Lobby {
       players: Array.from(room.players.values()),
       maxPlayers: room.maxPlayers,
       started: room.started,
+      mode: room.mode,
     };
   }
 }
