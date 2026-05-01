@@ -10,9 +10,14 @@ import type {
   Vec2, MapData, PlayerState, Projectile, Pickup,
   PlayerInput, GameState, WeaponType, WeaponDef, NPCType, ShopItem,
   StatUpgrade, InventorySlot, LobbyPlayer, SkillType, GameModeConfig,
-  ControlZoneState,
+  ControlZoneState, TeamId, FlagState, ArenaState,
 } from './types.js';
-import { GAME_MODE_DEFAULTS, ZONE_CAPTURE_TIME, ZONE_POINTS_PER_SECOND } from './types.js';
+import {
+  GAME_MODE_DEFAULTS, ZONE_CAPTURE_TIME, ZONE_POINTS_PER_SECOND,
+  TEAM_IDS, isTeamMode,
+  FLAG_PICKUP_RADIUS, FLAG_RETURN_RADIUS, FLAG_CAPTURE_RADIUS,
+  ARENA_PROGRESS_PER_ATTACKER,
+} from './types.js';
 
 import {
   WEAPON_DEFS, NPC_DEFS, NPC_WEAPON_DROPS, SHOP_ITEMS, XP_PER_LEVEL, HP_PER_LEVEL,
@@ -20,6 +25,9 @@ import {
   PROJECTILE_RADIUS, BASE_PLAYER_HP, BASE_PLAYER_SPEED, RESPAWN_TIME,
   MAX_NPCS, NPC_RESPAWN_INTERVAL, SHOP_INTERACT_RADIUS,
   PICKUP_COLLECT_RADIUS, SPEED_BOOST_MULTIPLIER, SPEED_BOOST_DURATION,
+  AGGRESSION_DAMAGE_BONUS, AGGRESSION_DURATION,
+  RESISTANT_REDUCTION, RESISTANT_DURATION,
+  BANDAGE_PACK_DOSES,
   MAX_INVENTORY_SLOTS, INITIAL_INVENTORY_SLOTS, COIN_LOSS_ON_DEATH, PICKUP_RADIUS, SKILL_DEFS,
   BOX_LOOT_TABLE, BOX_SPAWN_INTERVAL, MAX_PICKUP_BOXES, BANDAGE_HEAL_AMOUNT,
   BANDAGE_USE_COOLDOWN, BLOCK_SPEED_MULTIPLIER, ARMOR_PIECES,
@@ -178,6 +186,13 @@ export class Sim {
   private gameEnded = false;
   // Domination control zones — owner + 0..1 capture progress per zone.
   private zoneStates = new Map<number, ControlZoneState>();
+  // Team-mode state — populated in the constructor when the active mode
+  // needs them. Empty for non-team modes so getState() ships [] cheaply.
+  private flagStates = new Map<TeamId, FlagState>();
+  private arenaStates = new Map<number, ArenaState>();
+  // Win counter for captureFlag (captures per team). Mirrored into
+  // teamScore on getState().
+  private teamCaptures: Record<TeamId, number> = { red: 0, blue: 0 };
 
   constructor(lobbyPlayers: LobbyPlayer[], map: MapData, emitCallback: SimEventCallback, modeCfg?: GameModeConfig) {
     this.map = map;
@@ -186,17 +201,44 @@ export class Sim {
     for (const z of map.controlZones) {
       this.zoneStates.set(z.id, { id: z.id, ownerId: null, captureProgress: 0, contenderId: null });
     }
+    if (this.modeCfg.mode === 'captureFlag') {
+      for (const base of map.flagBases) {
+        this.flagStates.set(base.team, {
+          team: base.team, x: base.x, y: base.y, carrierId: null, atBase: true,
+        });
+      }
+    }
+    if (this.modeCfg.mode === 'captureArena') {
+      for (const a of map.teamArenas) {
+        this.arenaStates.set(a.id, {
+          id: a.id, ownerTeam: a.team,
+          progress: { red: 0, blue: 0 },
+        });
+      }
+    }
     for (const lp of lobbyPlayers) this.addPlayer(lp.id, lp.name);
+  }
+
+  // Pick the team with the fewest current humans+bots. Ties go to red so
+  // a solo player always lands on red (and bots fill blue).
+  private nextTeamAssignment(): TeamId {
+    let red = 0, blue = 0;
+    for (const p of this.players.values()) {
+      if (p.team === 'red') red++;
+      else if (p.team === 'blue') blue++;
+    }
+    return blue < red ? 'blue' : 'red';
   }
 
   // ── Player management ────────────────────────────────────
 
   addPlayer(id: string, name: string): void {
+    const team: TeamId = isTeamMode(this.modeCfg.mode) ? this.nextTeamAssignment() : 'red';
     const color = this.pickColor();
-    const spawn = this.randomSpawnPoint();
+    const spawn = this.spawnFor(team);
     const pistolDef = WEAPON_DEFS['pistol'];
     const player: PlayerState = {
-      id, name,
+      id, name, team,
       x: spawn.x, y: spawn.y,
       angle: 0,
       hp: BASE_PLAYER_HP,
@@ -228,6 +270,8 @@ export class Sim {
       alive: true,
       respawnTimer: 0,
       speedBoostTimer: 0,
+      aggressionTimer: 0,
+      resistantTimer: 0,
       shieldTimer: 2.5,
       blocking: false,
       bandageCooldown: 0,
@@ -306,6 +350,18 @@ export class Sim {
     return pts[Math.floor(Math.random() * pts.length)];
   }
 
+  // Picks a spawn anchor honoring team affiliation when the active mode
+  // groups players. Falls back to the generic rotation outside team modes
+  // and as a safety net if a team has no anchors defined.
+  private spawnFor(team: TeamId): Vec2 {
+    if (!isTeamMode(this.modeCfg.mode)) return this.randomSpawnPoint();
+    const teamPoints = this.map.teamSpawnPoints?.[team];
+    if (teamPoints && teamPoints.length > 0) {
+      return teamPoints[Math.floor(Math.random() * teamPoints.length)];
+    }
+    return this.randomSpawnPoint();
+  }
+
   // ── Input ────────────────────────────────────────────────
 
   setInput(playerId: string, input: PlayerInput): void {
@@ -366,11 +422,18 @@ export class Sim {
         this.emitCallback('purchaseFailed', playerId, { reason: 'Nemáš dost mincí' });
         return;
       }
-      // buyInventorySlot is the only consumable that can hard-fail post-charge —
-      // refuse if the player is already at the keyboard-bindable ceiling.
+      // Pre-check the consumables that can hard-fail before we charge —
+      // refusing post-charge would silently eat the player's coins.
       if (item === 'buyInventorySlot' && p.inventorySlots >= MAX_INVENTORY_SLOTS) {
         this.emitCallback('purchaseFailed', playerId, { reason: 'Maximální velikost inventáře' });
         return;
+      }
+      if (item === 'bandagePack') {
+        const hasBandage = p.inventory.some(s => s.type === 'bandage');
+        if (!hasBandage && p.inventory.length >= p.inventorySlots) {
+          this.emitCallback('purchaseFailed', playerId, { reason: 'Plný inventář' });
+          return;
+        }
       }
       p.coins -= cost;
       this.applyConsumable(p, item);
@@ -378,12 +441,8 @@ export class Sim {
     } else {
       const upgrade = item as StatUpgrade;
       const currentTier = p.upgrades[upgrade];
-      // Only maxHp keeps a hard cap; other stats can be purchased indefinitely.
-      // Cost flatlines at the last entry of `costs` past the original tier table.
-      if (upgrade === 'maxHp' && currentTier >= def.maxTier) {
-        this.emitCallback('purchaseFailed', playerId, { reason: 'Maximální úroveň' });
-        return;
-      }
+      // Every stat (incl. maxHp) is uncapped now. Cost flatlines at the last
+      // entry of `costs` past the original tier table.
       const cost = def.costs[currentTier] ?? def.costs[def.costs.length - 1];
       if (p.coins < cost) {
         this.emitCallback('purchaseFailed', playerId, { reason: 'Nemáš dost mincí' });
@@ -397,13 +456,31 @@ export class Sim {
   }
 
   private applyConsumable(p: PlayerState, item: ShopItem): void {
-    // hpPotion / shieldPotion were removed from the shop — heals come from
-    // bandage pickups / pickup drops now. speedBoost and buyInventorySlot
-    // are the current one-off purchases.
-    if (item === 'speedBoost') {
+    if (item === 'potionAgility') {
       p.speedBoostTimer = SPEED_BOOST_DURATION;
+    } else if (item === 'potionAggression') {
+      p.aggressionTimer = AGGRESSION_DURATION;
+    } else if (item === 'potionResistant') {
+      p.resistantTimer = RESISTANT_DURATION;
+    } else if (item === 'bandagePack') {
+      this.giveBandages(p, BANDAGE_PACK_DOSES);
     } else if (item === 'buyInventorySlot') {
       if (p.inventorySlots < MAX_INVENTORY_SLOTS) p.inventorySlots++;
+    }
+  }
+
+  // Stacks N bandage doses into the player's existing bandage slot, or
+  // takes a fresh slot if there's room. Caller pre-checks inventory space
+  // for the no-existing-slot case so we never silently lose doses.
+  private giveBandages(p: PlayerState, doses: number): void {
+    const idx = p.inventory.findIndex(s => s.type === 'bandage');
+    if (idx >= 0) {
+      p.inventory[idx].ammo += doses;
+      if (p.currentWeapon === 'bandage') p.currentAmmo = p.inventory[idx].ammo;
+      return;
+    }
+    if (p.inventory.length < p.inventorySlots) {
+      p.inventory.push({ type: 'bandage', ammo: doses });
     }
   }
 
@@ -460,11 +537,20 @@ export class Sim {
   }
 
   // Multipliers for damage. Pulled here so sim.ts has a single source of truth.
+  // Aggression potion stacks multiplicatively on top of the passive damage stat
+  // and the skill-tree bonus while its timer is positive.
+  private aggressionMul(p: PlayerState): number {
+    return p.aggressionTimer > 0 ? (1 + AGGRESSION_DAMAGE_BONUS) : 1;
+  }
   private meleeDamageMultiplier(p: PlayerState): number {
-    return (1 + p.damageBoost) * (1 + (p.skills.meleeDamage ?? 0) * SKILL_DEFS.meleeDamage.perTier);
+    return (1 + p.damageBoost)
+      * (1 + (p.skills.meleeDamage ?? 0) * SKILL_DEFS.meleeDamage.perTier)
+      * this.aggressionMul(p);
   }
   private gunDamageMultiplier(p: PlayerState): number {
-    return (1 + p.damageBoost) * (1 + (p.skills.gunDamage ?? 0) * SKILL_DEFS.gunDamage.perTier);
+    return (1 + p.damageBoost)
+      * (1 + (p.skills.gunDamage ?? 0) * SKILL_DEFS.gunDamage.perTier)
+      * this.aggressionMul(p);
   }
 
   switchWeapon(playerId: string, slot: number): void {
@@ -640,6 +726,8 @@ export class Sim {
     this.processPickups();
     this.processShopProximity();
     this.processControlZones();
+    this.processCaptureFlag();
+    this.processCaptureArena();
     this.processTimers();
     this.decayHitFlashes();
 
@@ -1155,7 +1243,10 @@ export class Sim {
     const resilience = (target.skills.resilience ?? 0) * SKILL_DEFS.resilience.perTier;
     const armorMul = Math.max(0.05, 1 - target.armor);
     const resilMul = Math.max(0.05, 1 - resilience);
-    dmg = dmg * armorMul * resilMul;
+    // Resistant potion is an additional incoming-damage multiplier while
+    // active. Same 0.05 floor so a stacked build can't fully nullify hits.
+    const resistantMul = target.resistantTimer > 0 ? Math.max(0.05, 1 - RESISTANT_REDUCTION) : 1;
+    dmg = dmg * armorMul * resilMul * resistantMul;
 
     // 3. Equipped armor piece — absorbs portion of matching-type damage.
     if (target.equippedArmor && target.equippedArmor.hp > 0) {
@@ -1260,6 +1351,8 @@ export class Sim {
     victim.shield = 0;
     victim.shieldTimer = 0;
     victim.speedBoostTimer = 0;
+    victim.aggressionTimer = 0;
+    victim.resistantTimer = 0;
     victim.equippedArmor = null;
     victim.blocking = false;
     victim.bandageCooldown = 0;
@@ -1351,7 +1444,7 @@ export class Sim {
   }
 
   private respawnPlayer(p: PlayerState): void {
-    const spawn = this.randomSpawnPoint();
+    const spawn = this.spawnFor(p.team);
     const pistolDef = WEAPON_DEFS['pistol'];
     p.alive = true;
     p.x = spawn.x;
@@ -1945,6 +2038,150 @@ export class Sim {
     }
   }
 
+  // Capture-Flag tick: keep carried flags pinned to their carrier, let
+  // allied players return a dropped flag, and capture the held flag when
+  // the carrier reaches their own base (with their own flag at home).
+  private processCaptureFlag(): void {
+    if (this.modeCfg.mode !== 'captureFlag') return;
+    if (this.gameEnded) return;
+
+    // 1. Keep flags glued to their carrier — but if the carrier died this
+    //    tick, drop the flag at the last known carrier position.
+    for (const flag of this.flagStates.values()) {
+      if (flag.carrierId === null) continue;
+      const carrier = this.players.get(flag.carrierId);
+      if (!carrier || !carrier.alive) {
+        flag.x = carrier?.x ?? flag.x;
+        flag.y = carrier?.y ?? flag.y;
+        flag.carrierId = null;
+        flag.atBase = false;
+        this.emitCallback('flagDropped', null, { team: flag.team, x: flag.x, y: flag.y });
+        continue;
+      }
+      flag.x = carrier.x;
+      flag.y = carrier.y;
+    }
+
+    // 2. Pickups + returns. One pass per flag: nearest qualifying player wins.
+    for (const flag of this.flagStates.values()) {
+      if (flag.carrierId !== null) continue;
+      const base = this.map.flagBases.find(b => b.team === flag.team);
+      if (!base) continue;
+
+      let bestPickupId: string | null = null;
+      let bestPickupDist = Infinity;
+      let bestReturnId: string | null = null;
+      let bestReturnDist = Infinity;
+
+      for (const p of this.players.values()) {
+        if (!p.alive) continue;
+        const d = dist(p, flag);
+        if (p.team !== flag.team) {
+          // Enemy near a stationary (at-base or dropped) flag — picks up.
+          if (d <= FLAG_PICKUP_RADIUS + PLAYER_RADIUS && d < bestPickupDist) {
+            bestPickupDist = d;
+            bestPickupId = p.id;
+          }
+        } else if (!flag.atBase) {
+          // Ally near a *dropped* flag — instant return.
+          if (d <= FLAG_RETURN_RADIUS + PLAYER_RADIUS && d < bestReturnDist) {
+            bestReturnDist = d;
+            bestReturnId = p.id;
+          }
+        }
+      }
+
+      if (bestPickupId) {
+        flag.carrierId = bestPickupId;
+        flag.atBase = false;
+        this.emitCallback('flagPicked', null, { team: flag.team, carrierId: bestPickupId });
+      } else if (bestReturnId && !flag.atBase) {
+        flag.x = base.x;
+        flag.y = base.y;
+        flag.atBase = true;
+        this.emitCallback('flagReturned', null, { team: flag.team });
+      }
+    }
+
+    // 3. Captures. A carrier scoring at their own base with their own flag
+    //    at home increments their team and resets the captured flag.
+    for (const p of this.players.values()) {
+      if (!p.alive) continue;
+      // Whichever flag this player is carrying.
+      let carriedTeam: TeamId | null = null;
+      for (const flag of this.flagStates.values()) {
+        if (flag.carrierId === p.id) { carriedTeam = flag.team; break; }
+      }
+      if (!carriedTeam) continue;
+
+      const ownBase = this.map.flagBases.find(b => b.team === p.team);
+      const ownFlag = this.flagStates.get(p.team);
+      if (!ownBase || !ownFlag) continue;
+      if (!ownFlag.atBase) continue;
+      if (dist(p, ownBase) > FLAG_CAPTURE_RADIUS) continue;
+
+      // Capture!
+      const enemyFlag = this.flagStates.get(carriedTeam)!;
+      const enemyBase = this.map.flagBases.find(b => b.team === carriedTeam)!;
+      enemyFlag.x = enemyBase.x;
+      enemyFlag.y = enemyBase.y;
+      enemyFlag.carrierId = null;
+      enemyFlag.atBase = true;
+      this.teamCaptures[p.team]++;
+      this.emitCallback('flagCaptured', null, {
+        scoringTeam: p.team, capturedTeam: carriedTeam, capturerId: p.id,
+        score: this.teamCaptures[p.team],
+      });
+      if (this.modeCfg.pointTarget > 0 && this.teamCaptures[p.team] >= this.modeCfg.pointTarget) {
+        this.declareTeamWin(p.team);
+      }
+    }
+  }
+
+  // Capture-Arena tick: every alive opposing-team player inside an arena
+  // adds ARENA_PROGRESS_PER_ATTACKER * DT to their team's progress. Capped
+  // at pointTarget (= 100). First arena that hits the cap ends the match.
+  private processCaptureArena(): void {
+    if (this.modeCfg.mode !== 'captureArena') return;
+    if (this.gameEnded) return;
+
+    const target = this.modeCfg.pointTarget > 0 ? this.modeCfg.pointTarget : 100;
+
+    for (const arena of this.map.teamArenas) {
+      const state = this.arenaStates.get(arena.id);
+      if (!state) continue;
+
+      for (const t of TEAM_IDS) {
+        if (t === state.ownerTeam) continue;
+        let attackers = 0;
+        for (const p of this.players.values()) {
+          if (!p.alive) continue;
+          if (p.team !== t) continue;
+          if (dist(p, arena) <= arena.radius + PLAYER_RADIUS) attackers++;
+        }
+        if (attackers > 0) {
+          state.progress[t] = Math.min(target, state.progress[t] + ARENA_PROGRESS_PER_ATTACKER * attackers * DT);
+          if (state.progress[t] >= target) {
+            this.emitCallback('arenaCaptured', null, { arenaId: arena.id, capturedTeam: state.ownerTeam, scoringTeam: t });
+            this.declareTeamWin(t);
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  // Shared win-resolution path for team modes — emits gameOver with the
+  // winning team highlighted in the scoreboard so the UI can call out the
+  // result.
+  private declareTeamWin(team: TeamId): void {
+    if (this.gameEnded) return;
+    this.gameEnded = true;
+    const scores = Array.from(this.players.values())
+      .map(p => ({ id: p.id, name: p.name, kills: p.kills, deaths: p.deaths, team: p.team, win: p.team === team }));
+    this.emitCallback('gameOver', null, { winnerTeam: team, scores });
+  }
+
   private processShopProximity(): void {
     for (const [pid, p] of this.players) {
       if (!p.alive) continue;
@@ -1995,6 +2232,14 @@ export class Sim {
         p.speedBoostTimer -= DT;
         if (p.speedBoostTimer <= 0) p.speedBoostTimer = 0;
       }
+      if (p.aggressionTimer > 0) {
+        p.aggressionTimer -= DT;
+        if (p.aggressionTimer <= 0) p.aggressionTimer = 0;
+      }
+      if (p.resistantTimer > 0) {
+        p.resistantTimer -= DT;
+        if (p.resistantTimer <= 0) p.resistantTimer = 0;
+      }
     }
   }
 
@@ -2019,7 +2264,32 @@ export class Sim {
     const controlZones: ControlZoneState[] = [];
     for (const [, z] of this.zoneStates) controlZones.push({ ...z });
 
-    return { players, npcs, projectiles, pickups, controlZones, time: this.time };
+    // Team-mode payloads. Empty for non-team modes — clients read length
+    // before iterating so this stays cheap on the wire.
+    const flags: FlagState[] = [];
+    for (const [, f] of this.flagStates) flags.push({ ...f });
+    const arenas: ArenaState[] = [];
+    for (const [, a] of this.arenaStates) arenas.push({ ...a, progress: { ...a.progress } });
+
+    // Team score: captures for captureFlag; for captureArena, the highest
+    // arena-progress that team currently holds (so HUD can show "closest
+    // we've come to a win"). Always sets both keys to keep consumers
+    // type-safe.
+    const teamScore: Record<TeamId, number> = { red: 0, blue: 0 };
+    if (this.modeCfg.mode === 'captureFlag') {
+      teamScore.red = this.teamCaptures.red;
+      teamScore.blue = this.teamCaptures.blue;
+    } else if (this.modeCfg.mode === 'captureArena') {
+      for (const a of this.arenaStates.values()) {
+        teamScore.red = Math.max(teamScore.red, a.progress.red);
+        teamScore.blue = Math.max(teamScore.blue, a.progress.blue);
+      }
+    }
+
+    return {
+      players, npcs, projectiles, pickups, controlZones, time: this.time,
+      flags, arenas, teamScore,
+    };
   }
 
   getMap(): MapData {

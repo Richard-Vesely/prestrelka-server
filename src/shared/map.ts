@@ -5,7 +5,7 @@
 // =====================================================================
 
 // Map generator — ported from shooter-server/src/map.ts so single-player mode works in-browser.
-import type { MapData, Wall, ShopStation, SpawnZone, Vec2 } from './types.js';
+import type { MapData, Wall, ShopStation, SpawnZone, Vec2, FlagBase, TeamArena, TeamId } from './types.js';
 
 export function createMap(): MapData {
   const W = 3000;
@@ -93,5 +93,39 @@ export function createMap(): MapData {
     { id: 2, x: 2300, y: 1900, radius: 120 },
   ];
 
-  return { width: W, height: H, walls, shopStations, npcSpawnZones, playerSpawnPoints, controlZones };
+  // Team-mode anchors — red owns the top-left quadrant, blue the bottom-right,
+  // mirroring the existing shop / NPC layout so the map stays balanced.
+  const flagBases: FlagBase[] = [
+    { team: 'red',  x: 350,  y: 350,  radius: 80 },
+    { team: 'blue', x: 2650, y: 2650, radius: 80 },
+  ];
+
+  // Capture-Arena: a single arena per team, deep in their half. Far enough
+  // from the spawn that the attacker has to fight through map territory to
+  // start their 60-second hold.
+  const teamArenas: TeamArena[] = [
+    { id: 0, team: 'red',  x: 600,  y: 600,  radius: 130 },
+    { id: 1, team: 'blue', x: 2400, y: 2400, radius: 130 },
+  ];
+
+  // Per-team spawn rotations. Each team has a few options near (but not on
+  // top of) their flag base so they don't immediately stomp incoming
+  // attackers.
+  const teamSpawnPoints: Record<TeamId, Vec2[]> = {
+    red: [
+      { x: 350,  y: 700 },
+      { x: 700,  y: 350 },
+      { x: 500,  y: 500 },
+    ],
+    blue: [
+      { x: 2650, y: 2300 },
+      { x: 2300, y: 2650 },
+      { x: 2500, y: 2500 },
+    ],
+  };
+
+  return {
+    width: W, height: H, walls, shopStations, npcSpawnZones,
+    playerSpawnPoints, controlZones, flagBases, teamArenas, teamSpawnPoints,
+  };
 }

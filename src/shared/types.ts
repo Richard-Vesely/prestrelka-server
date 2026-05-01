@@ -40,6 +40,19 @@ export interface Vec2 { x: number; y: number }
 
 export type WeaponType = 'fists' | 'knife' | 'katana' | 'pistol' | 'shotgun' | 'smg' | 'assault_rifle' | 'sniper' | 'rocket_launcher';
 
+// Team identifier for the team-vs-team modes (captureFlag, captureArena).
+// Non-team modes default everyone to 'red' so the field is always defined.
+export type TeamId = 'red' | 'blue';
+export const TEAM_IDS: TeamId[] = ['red', 'blue'];
+export const TEAM_COLORS: Record<TeamId, string> = {
+  red: '#ef4444',
+  blue: '#3b82f6',
+};
+export const TEAM_LABELS: Record<TeamId, string> = {
+  red: 'Červení',
+  blue: 'Modří',
+};
+
 // SlotItem covers anything that can occupy an inventory slot — weapons + bandages.
 export type SlotItem = WeaponType | 'bandage';
 
@@ -133,6 +146,9 @@ export interface PlayerState {
   // Generic mode-specific score (currently used by 'domination' for held-zone
   // points). Other modes leave it at 0.
   modeScore: number;
+  // Team assignment. Always set, but only meaningful in team modes
+  // (captureFlag, captureArena). Solo / FFA modes default everyone to 'red'.
+  team: TeamId;
   currentWeapon: SlotItem;
   currentAmmo: number;
   // Durability of the currently-wielded melee weapon (mirror of the slot's
@@ -146,6 +162,10 @@ export interface PlayerState {
   alive: boolean;
   respawnTimer: number;
   speedBoostTimer: number;
+  // Timer-driven potion buffs. Aggression boosts outgoing damage; resistant
+  // reduces incoming damage. Both decrement in processTimers.
+  aggressionTimer: number;
+  resistantTimer: number;
   shieldTimer: number;
   // True while the player is actively right-click blocking with a melee weapon.
   blocking: boolean;
@@ -271,12 +291,24 @@ export interface MapData {
   npcSpawnZones: SpawnZone[];
   playerSpawnPoints: Vec2[];
   controlZones: ControlZone[];
+  // Team-mode map data. Always populated so a single map can serve every
+  // mode; the sim only consumes the bits relevant to the active mode.
+  flagBases: FlagBase[];
+  teamArenas: TeamArena[];
+  // Per-team spawn anchors. Team modes spawn the player at their own anchor
+  // instead of the generic playerSpawnPoints rotation.
+  teamSpawnPoints: Record<TeamId, Vec2[]>;
 }
 
 // --- Shop ---
 
 export type StatUpgrade = 'maxHp' | 'speed' | 'armor' | 'damage' | 'regen';
-export type Consumable = 'speedBoost' | 'buyInventorySlot';
+export type Consumable =
+  | 'buyInventorySlot'
+  | 'bandagePack'
+  | 'potionAgility'
+  | 'potionAggression'
+  | 'potionResistant';
 // Each weapon and each armor piece is also a buyable shop item — they share
 // the unified ShopItem union below.
 export type WeaponBuy =
@@ -354,62 +386,60 @@ export interface ShopItemDef {
 // Items 6 (hpPotion) and 7 (shieldPotion) were removed — heals come from
 // bandage pickups instead. Weapons + armor are buyable here as an alternative
 // to scavenging boxes.
+// Flat-pricing rules (set by Richard 2026-05-01):
+//   * Stats, items, armor, advanced weapons → 100
+//   * Simple weapons (pistol, knife) → 50
+//   * No item is capped — every stat including maxHp can be bought indefinitely.
+// Tier costs are flat: each costs[] entry is the same.
 export const SHOP_ITEMS: Record<ShopItem, ShopItemDef> = {
-  // ── Stat upgrades (flat costs per tier; only maxHp has a hard cap) ──
-  maxHp:        { id: 'maxHp',        name: 'Max HP',          description: '+20 HP',                         maxTier: 5, costs: [60, 60, 60, 60, 60],   isConsumable: false, category: 'stats' },
-  speed:        { id: 'speed',        name: 'Rychlost',        description: '+10 % rychlosti',                maxTier: 3, costs: [150, 150, 150],         isConsumable: false, category: 'stats' },
-  armor:        { id: 'armor',        name: 'Pasivní brnění',  description: '-15 % poškození',                maxTier: 3, costs: [250, 250, 250],         isConsumable: false, category: 'stats' },
-  damage:       { id: 'damage',       name: 'Poškození',       description: '+15 % poškození',                maxTier: 3, costs: [300, 300, 300],         isConsumable: false, category: 'stats' },
-  regen:        { id: 'regen',        name: 'Regenerace',      description: '+1 HP/s',                        maxTier: 3, costs: [200, 200, 200],         isConsumable: false, category: 'stats' },
+  // ── Stat upgrades (uncapped) ────────────────────────────
+  maxHp:        { id: 'maxHp',        name: 'Max HP',          description: '+20 HP',                         maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
+  speed:        { id: 'speed',        name: 'Rychlost',        description: '+10 % rychlosti',                maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
+  armor:        { id: 'armor',        name: 'Pasivní brnění',  description: '-15 % poškození',                maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
+  damage:       { id: 'damage',       name: 'Poškození',       description: '+15 % poškození',                maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
+  regen:        { id: 'regen',        name: 'Regenerace',      description: '+1 HP/s',                        maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
 
-  // ── Items / consumables ─────────────────────────────────
-  speedBoost:        { id: 'speedBoost',        name: 'Turbo',           description: '+50 % rychlost na 15 s',         maxTier: 1, costs: [60],   isConsumable: true,  category: 'items' },
-  buyInventorySlot:  { id: 'buyInventorySlot',  name: 'Slot navíc',      description: '+1 místo v inventáři',           maxTier: 1, costs: [150],  isConsumable: true,  category: 'items' },
+  // ── Ostatní (consumables) ───────────────────────────────
+  bandagePack:       { id: 'bandagePack',       name: 'Tři obvazy',       description: '3× obvaz (50 HP/kus)',           maxTier: 1, costs: [100], isConsumable: true,  category: 'items' },
+  potionAggression:  { id: 'potionAggression',  name: 'Lektvar agrese',   description: '+50 % zranění na 15 s',          maxTier: 1, costs: [100], isConsumable: true,  category: 'items' },
+  potionResistant:   { id: 'potionResistant',   name: 'Lektvar odolnosti',description: '-50 % příchozího zranění na 15 s',maxTier: 1, costs: [100], isConsumable: true,  category: 'items' },
+  potionAgility:     { id: 'potionAgility',     name: 'Lektvar mrštnosti',description: '+50 % rychlost na 15 s',         maxTier: 1, costs: [100], isConsumable: true,  category: 'items' },
+  buyInventorySlot:  { id: 'buyInventorySlot',  name: 'Slot navíc',       description: '+1 místo v inventáři',           maxTier: 1, costs: [100], isConsumable: true,  category: 'items' },
 
-  // ── Weapons (buy = add to inventory or refill ammo) ──────
-  buyPistol:         { id: 'buyPistol',         name: 'Koupit pistoli',     description: '+8 nábojů',          maxTier: 1, costs: [80],  isConsumable: true, category: 'weapons', buyWeapon: 'pistol' },
-  buyKnife:          { id: 'buyKnife',          name: 'Koupit nůž',         description: 'Trvanlivost 60',     maxTier: 1, costs: [100], isConsumable: true, category: 'weapons', buyWeapon: 'knife' },
-  buyShotgun:        { id: 'buyShotgun',        name: 'Koupit brokovnici',  description: '+6 nábojů',          maxTier: 1, costs: [200], isConsumable: true, category: 'weapons', buyWeapon: 'shotgun' },
-  buySmg:            { id: 'buySmg',            name: 'Koupit samopal',     description: '+30 nábojů',         maxTier: 1, costs: [200], isConsumable: true, category: 'weapons', buyWeapon: 'smg' },
-  buyKatana:         { id: 'buyKatana',         name: 'Koupit katanu',      description: 'Trvanlivost 150',    maxTier: 1, costs: [350], isConsumable: true, category: 'weapons', buyWeapon: 'katana' },
-  buyAssaultRifle:   { id: 'buyAssaultRifle',   name: 'Koupit puška',       description: '+15 nábojů',         maxTier: 1, costs: [350], isConsumable: true, category: 'weapons', buyWeapon: 'assault_rifle' },
-  buySniper:         { id: 'buySniper',         name: 'Koupit odstřelovačku', description: '+3 náboje',        maxTier: 1, costs: [400], isConsumable: true, category: 'weapons', buyWeapon: 'sniper' },
-  buyRocketLauncher: { id: 'buyRocketLauncher', name: 'Koupit raketomet',   description: '+2 náboje',          maxTier: 1, costs: [800], isConsumable: true, category: 'weapons', buyWeapon: 'rocket_launcher' },
+  // ── Weapons (simple = 50, advanced = 100) ───────────────
+  buyPistol:         { id: 'buyPistol',         name: 'Koupit pistoli',       description: '+8 nábojů',         maxTier: 1, costs: [50],  isConsumable: true, category: 'weapons', buyWeapon: 'pistol' },
+  buyKnife:          { id: 'buyKnife',          name: 'Koupit nůž',           description: 'Trvanlivost 60',    maxTier: 1, costs: [50],  isConsumable: true, category: 'weapons', buyWeapon: 'knife' },
+  buyShotgun:        { id: 'buyShotgun',        name: 'Koupit brokovnici',    description: '+6 nábojů',         maxTier: 1, costs: [100], isConsumable: true, category: 'weapons', buyWeapon: 'shotgun' },
+  buySmg:            { id: 'buySmg',            name: 'Koupit samopal',       description: '+30 nábojů',        maxTier: 1, costs: [100], isConsumable: true, category: 'weapons', buyWeapon: 'smg' },
+  buyKatana:         { id: 'buyKatana',         name: 'Koupit katanu',        description: 'Trvanlivost 150',   maxTier: 1, costs: [100], isConsumable: true, category: 'weapons', buyWeapon: 'katana' },
+  buyAssaultRifle:   { id: 'buyAssaultRifle',   name: 'Koupit puška',         description: '+15 nábojů',        maxTier: 1, costs: [100], isConsumable: true, category: 'weapons', buyWeapon: 'assault_rifle' },
+  buySniper:         { id: 'buySniper',         name: 'Koupit odstřelovačku', description: '+3 náboje',         maxTier: 1, costs: [100], isConsumable: true, category: 'weapons', buyWeapon: 'sniper' },
+  buyRocketLauncher: { id: 'buyRocketLauncher', name: 'Koupit raketomet',     description: '+2 náboje',         maxTier: 1, costs: [100], isConsumable: true, category: 'weapons', buyWeapon: 'rocket_launcher' },
 
   // ── Armor pieces (equipped in the armor slot, deplete on hit) ──
-  buyArmorClose:     { id: 'buyArmorClose',     name: 'Brnění zblízka',     description: 'Pohlcuje 60 % zásahu zblízka',  maxTier: 1, costs: [200], isConsumable: true, category: 'armor', buyArmor: 'close' },
-  buyArmorLong:      { id: 'buyArmorLong',      name: 'Brnění zdálky',      description: 'Pohlcuje 60 % zásahu zdálky',   maxTier: 1, costs: [200], isConsumable: true, category: 'armor', buyArmor: 'long' },
-  buyArmorUniversal: { id: 'buyArmorUniversal', name: 'Univerzální brnění', description: 'Pohlcuje 40 % každého zásahu',  maxTier: 1, costs: [400], isConsumable: true, category: 'armor', buyArmor: 'universal' },
+  buyArmorClose:     { id: 'buyArmorClose',     name: 'Brnění zblízka',     description: 'Pohlcuje 60 % zásahu zblízka',  maxTier: 1, costs: [100], isConsumable: true, category: 'armor', buyArmor: 'close' },
+  buyArmorLong:      { id: 'buyArmorLong',      name: 'Brnění zdálky',      description: 'Pohlcuje 60 % zásahu zdálky',   maxTier: 1, costs: [100], isConsumable: true, category: 'armor', buyArmor: 'long' },
+  buyArmorUniversal: { id: 'buyArmorUniversal', name: 'Univerzální brnění', description: 'Pohlcuje 40 % každého zásahu',  maxTier: 1, costs: [100], isConsumable: true, category: 'armor', buyArmor: 'universal' },
 };
 
-// Display order in the shop overlay. Number keys 1..N map to this list.
-// Single source of truth shared by sim, renderer, and shooter.ts.
-export const SHOP_ITEM_ORDER: ShopItem[] = [
-  // Stats first (most-bought passives)
-  'maxHp', 'speed', 'armor', 'damage', 'regen',
-  // Items
-  'speedBoost', 'buyInventorySlot',
-  // Weapons (cheapest → most expensive)
-  'buyPistol', 'buyKnife', 'buyShotgun', 'buySmg', 'buyKatana', 'buyAssaultRifle', 'buySniper', 'buyRocketLauncher',
-  // Armor pieces
-  'buyArmorClose', 'buyArmorLong', 'buyArmorUniversal',
-];
-
-// Per-category ordered list (drives Q/W/E/R drill-down view).
+// Per-category ordered list — drives column rendering and the keyboard
+// "select column then buy item N" flow.
 export const SHOP_CATEGORY_ORDER: Record<ShopCategory, ShopItem[]> = {
   stats:   ['maxHp', 'speed', 'armor', 'damage', 'regen'],
-  items:   ['speedBoost', 'buyInventorySlot'],
+  items:   ['bandagePack', 'potionAggression', 'potionResistant', 'potionAgility', 'buyInventorySlot'],
   weapons: ['buyPistol', 'buyKnife', 'buyShotgun', 'buySmg', 'buyKatana', 'buyAssaultRifle', 'buySniper', 'buyRocketLauncher'],
   armor:   ['buyArmorClose', 'buyArmorLong', 'buyArmorUniversal'],
 };
 
 // Category list as it appears in the shop HUD. Mapped to number keys 1-4 so
 // they don't collide with E (the shop open/close key) or with WASD movement.
-export const SHOP_CATEGORY_LIST: { category: ShopCategory; key: string; keyLabel: string; name: string }[] = [
-  { category: 'stats',   key: 'Digit1', keyLabel: '1', name: 'Statistiky' },
-  { category: 'weapons', key: 'Digit2', keyLabel: '2', name: 'Zbraně' },
-  { category: 'armor',   key: 'Digit3', keyLabel: '3', name: 'Brnění' },
-  { category: 'items',   key: 'Digit4', keyLabel: '4', name: 'Předměty' },
+// Two-step keyboard buy: press 1-4 to highlight a column, then 1-N to buy
+// the Nth item in that column. Mouse click on any item still buys directly.
+export const SHOP_CATEGORY_LIST: { category: ShopCategory; keyLabel: string; name: string }[] = [
+  { category: 'stats',   keyLabel: '1', name: 'Vlastnosti' },
+  { category: 'weapons', keyLabel: '2', name: 'Zbraně' },
+  { category: 'armor',   keyLabel: '3', name: 'Brnění' },
+  { category: 'items',   keyLabel: '4', name: 'Ostatní' },
 ];
 
 // --- NPC Definitions ---
@@ -499,6 +529,15 @@ export const SHOP_INTERACT_RADIUS = 60;
 export const PICKUP_COLLECT_RADIUS = 30;
 export const SPEED_BOOST_MULTIPLIER = 1.5;
 export const SPEED_BOOST_DURATION = 15;
+// Aggression potion: multiplicative damage bonus, fixed duration.
+export const AGGRESSION_DAMAGE_BONUS = 0.5;   // +50 % outgoing damage
+export const AGGRESSION_DURATION = 15;        // seconds
+// Resistant potion: multiplicative incoming-damage reduction, fixed duration.
+export const RESISTANT_REDUCTION = 0.5;       // -50 % incoming damage
+export const RESISTANT_DURATION = 15;         // seconds
+// 3-bandage pack from the shop. Bandage slots stack so this is just a
+// shorthand for handing the player N doses of the existing bandage item.
+export const BANDAGE_PACK_DOSES = 3;
 export const SHIELD_POTION_AMOUNT = 50;
 export const SHIELD_POTION_DURATION = 30;
 export const HP_POTION_AMOUNT = 50;
@@ -528,6 +567,14 @@ export interface GameState {
   pickups: Pickup[];
   controlZones: ControlZoneState[];
   time: number;
+  // Team-mode state. Both arrays are present in every state but stay empty
+  // outside of the matching mode, so older clients ignore them harmlessly.
+  flags: FlagState[];
+  arenas: ArenaState[];
+  // Aggregate team scores for HUD rendering.
+  //   captureFlag  — captures per team (whichever hits pointTarget wins).
+  //   captureArena — best per-team capture progress over all arenas.
+  teamScore: Record<TeamId, number>;
 }
 
 // --- Game modes ---
@@ -539,21 +586,32 @@ export interface GameState {
 //   lastStanding — each player has N lives; last with lives > 0 wins.
 //   lootLord     — first to N lifetime coins (coins earned, never spent) wins.
 
-export type GameMode = 'massacre' | 'lastStanding' | 'lootLord' | 'domination';
+export type GameMode = 'massacre' | 'lastStanding' | 'lootLord' | 'domination' | 'captureFlag' | 'captureArena';
+
+// Modes where players are sorted into red/blue at spawn. Non-team modes
+// don't render the team picker / score banner and assign everyone 'red'.
+export const TEAM_MODES: ReadonlyArray<GameMode> = ['captureFlag', 'captureArena'];
+export function isTeamMode(mode: GameMode): boolean {
+  return TEAM_MODES.includes(mode);
+}
 
 export interface GameModeConfig {
   mode: GameMode;
   killTarget: number;        // -1 disables; only used by 'massacre'
   livesPerPlayer: number;    // -1 = infinite respawns; only used by 'lastStanding'
   coinTarget: number;        // -1 disables; only used by 'lootLord'
-  pointTarget: number;       // -1 disables; only used by 'domination'
+  pointTarget: number;       // -1 disables; used by 'domination' and team modes
+                             //   (captureFlag = captures to win,
+                             //    captureArena = capture progress per arena, fixed at 100)
 }
 
 export const GAME_MODE_DEFAULTS: Record<GameMode, GameModeConfig> = {
-  massacre:     { mode: 'massacre',     killTarget: 20, livesPerPlayer: -1, coinTarget: -1,  pointTarget: -1 },
-  lastStanding: { mode: 'lastStanding', killTarget: -1, livesPerPlayer: 5,  coinTarget: -1,  pointTarget: -1 },
-  lootLord:     { mode: 'lootLord',     killTarget: -1, livesPerPlayer: -1, coinTarget: 500, pointTarget: -1 },
-  domination:   { mode: 'domination',   killTarget: -1, livesPerPlayer: -1, coinTarget: -1,  pointTarget: 400 },
+  massacre:      { mode: 'massacre',      killTarget: 20, livesPerPlayer: -1, coinTarget: -1,  pointTarget: -1 },
+  lastStanding:  { mode: 'lastStanding',  killTarget: -1, livesPerPlayer: 5,  coinTarget: -1,  pointTarget: -1 },
+  lootLord:      { mode: 'lootLord',      killTarget: -1, livesPerPlayer: -1, coinTarget: 500, pointTarget: -1 },
+  domination:    { mode: 'domination',    killTarget: -1, livesPerPlayer: -1, coinTarget: -1,  pointTarget: 400 },
+  captureFlag:   { mode: 'captureFlag',   killTarget: -1, livesPerPlayer: -1, coinTarget: -1,  pointTarget: 3 },
+  captureArena:  { mode: 'captureArena',  killTarget: -1, livesPerPlayer: -1, coinTarget: -1,  pointTarget: 100 },
 };
 
 export const GAME_MODE_DEFS: Record<GameMode, { name: string; tagline: string; description: string }> = {
@@ -577,6 +635,16 @@ export const GAME_MODE_DEFS: Record<GameMode, { name: string; tagline: string; d
     tagline: 'Drž zóny — první na 400 bodů',
     description: 'Tři kontrolní zóny rozeseté po mapě. Stůj v zóně sám, abys ji ovládl. Za každou ovládanou zónu dostáváš 1 bod/s. První na 400 bodů vyhrává.',
   },
+  captureFlag: {
+    name: 'Vlajka',
+    tagline: 'Týmy — ukradni vlajku, dones do své základny',
+    description: 'Červení proti Modrým. Sebereš vlajku v cizí základně, doneseš ke své. Tým, který vlastní 3 vlajky, vyhrává.',
+  },
+  captureArena: {
+    name: 'Aréna',
+    tagline: 'Týmy — obsaď arénu nepřítele od 0 do 100',
+    description: 'Červení proti Modrým. Stůj v aréně nepřítele, abys ji obsazoval. Postup nelze otočit. Tým, který obsadí cizí arénu na 100 %, vyhrává.',
+  },
 };
 
 // Capture-zone definition for domination mode. Map exposes a `controlZones`
@@ -599,6 +667,59 @@ export interface ControlZoneState {
 // zone, plus the points-per-second the owner accrues.
 export const ZONE_CAPTURE_TIME = 3;
 export const ZONE_POINTS_PER_SECOND = 1;
+
+// --- Team modes: shared map data + state ---
+//
+// Capture Flag: every team has one base. The flag rests at the base when
+// idle; an enemy carries it (visible on the map and minimap); it drops
+// when its carrier dies; an ally returning to the dropped flag instantly
+// teleports it back to base. A capture happens when an enemy carrier
+// reaches their own base while their own flag is also at home.
+export interface FlagBase {
+  team: TeamId;
+  x: number;
+  y: number;
+  // Capture / pickup radius around the base.
+  radius: number;
+}
+
+export interface FlagState {
+  team: TeamId;            // which team this flag *belongs* to
+  x: number;               // current world position (mirrors carrier when held)
+  y: number;
+  carrierId: string | null; // null when at base or dropped on the ground
+  atBase: boolean;          // false while carried OR dropped on the ground
+}
+
+export const FLAG_PICKUP_RADIUS = 28;
+export const FLAG_RETURN_RADIUS = 28;
+export const FLAG_CAPTURE_RADIUS = 60;
+
+// Capture Arena: each team has one or more arenas. While alive opposing
+// players stand inside an arena, capture progress for THEIR team rises
+// toward 100. Progress never reverses. First arena to 100 ends the match.
+export interface TeamArena {
+  id: number;
+  team: TeamId;            // the team that *owns* the arena (defends it)
+  x: number;
+  y: number;
+  radius: number;
+}
+
+export interface ArenaState {
+  id: number;
+  ownerTeam: TeamId;
+  // Per-attacker-team capture progress (0..pointTarget). Indexed by the
+  // attacker team — the owner team's entry is always 0 since you can't
+  // capture your own arena.
+  progress: Record<TeamId, number>;
+}
+
+// Capture Arena: progress per second contributed by each attacker present.
+// One attacker → ~100 / ARENA_CAPTURE_TIME progress per second. Multiple
+// attackers stack additively (so 2 attackers fill 2× faster).
+export const ARENA_CAPTURE_TIME = 60;            // seconds for a single attacker to fully capture
+export const ARENA_PROGRESS_PER_ATTACKER = 100 / ARENA_CAPTURE_TIME;
 
 // --- Lobby ---
 
@@ -655,6 +776,8 @@ export const S2C_EVENTS = [
   // Local-sim-only effect events (also safe for future server use):
   'weaponFired', 'projectileHitWall', 'damageDealt', 'hitConfirmed', 'npcKilled',
   'explosion',
+  // Team-mode events (captureFlag, captureArena):
+  'flagPicked', 'flagDropped', 'flagReturned', 'flagCaptured', 'arenaCaptured',
   'error',
 ] as const;
 
@@ -686,7 +809,12 @@ export interface S2C {
   playerReady: { id: string };
   gameStart: { map: MapData; mode?: GameModeConfig };
   gameState: GameState;
-  gameOver: { scores: { id: string; name: string; kills: number; deaths: number }[] };
+  gameOver: {
+    scores: { id: string; name: string; kills: number; deaths: number; team?: TeamId; win?: boolean }[];
+    // Set when the match was decided by a team-mode win (captureFlag /
+    // captureArena). FFA / domination leave it undefined.
+    winnerTeam?: TeamId;
+  };
   playerKilled: { killerId: string; killerName: string; victimId: string; victimName: string; weapon: WeaponType };
   playerRespawned: { id: string; x: number; y: number };
   pickupCollected: { pickupId: number; playerId: string };
@@ -703,5 +831,12 @@ export interface S2C {
   hitConfirmed: Record<string, never>;
   npcKilled: { x: number; y: number; type: NPCType };
   explosion: { x: number; y: number; radius: number };
+  // Team-mode lifecycle events. Clients can use them for sound / kill-feed
+  // style notifications; the canonical state still flows through gameState.
+  flagPicked:    { team: TeamId; carrierId: string };
+  flagDropped:   { team: TeamId; x: number; y: number };
+  flagReturned:  { team: TeamId };
+  flagCaptured:  { scoringTeam: TeamId; capturedTeam: TeamId; capturerId: string; score: number };
+  arenaCaptured: { arenaId: number; capturedTeam: TeamId; scoringTeam: TeamId };
   error: { message: string };
 }
