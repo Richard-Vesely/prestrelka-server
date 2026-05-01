@@ -27,7 +27,10 @@ import {
   PICKUP_COLLECT_RADIUS, SPEED_BOOST_MULTIPLIER, SPEED_BOOST_DURATION,
   AGGRESSION_DAMAGE_BONUS, AGGRESSION_DURATION,
   RESISTANT_REDUCTION, RESISTANT_DURATION,
-  BANDAGE_PACK_DOSES,
+  BANDAGE_PACK_DOSES, DAMAGE_FLOOR,
+  ZOMBIE_WAVE_BASE_COUNT, ZOMBIE_WAVE_GROWTH,
+  ZOMBIE_WAVE_SPAWN_INTERVAL, ZOMBIE_WAVE_INTERMISSION_S,
+  ZOMBIE_PLAYER_HP, ZOMBIE_PLAYER_SPEED_MUL, ZOMBIE_PLAYER_DAMAGE_BONUS,
   MAX_INVENTORY_SLOTS, INITIAL_INVENTORY_SLOTS, COIN_LOSS_ON_DEATH, PICKUP_RADIUS, SKILL_DEFS,
   BOX_LOOT_TABLE, BOX_SPAWN_INTERVAL, MAX_PICKUP_BOXES, BANDAGE_HEAL_AMOUNT,
   BANDAGE_USE_COOLDOWN, BLOCK_SPEED_MULTIPLIER, ARMOR_PIECES,
@@ -194,6 +197,14 @@ export class Sim {
   // teamScore on getState().
   private teamCaptures: Record<TeamId, number> = { red: 0, blue: 0 };
 
+  // Zombie-apocalypse wave state. All zero outside that mode.
+  private zombieWave = 0;
+  private zombieWaveTarget = 0;       // zombies to spawn this wave
+  private zombieSpawnedThisWave = 0;  // zombies drip-spawned so far
+  private zombieSpawnTimer = 0;       // drip-spawn cooldown
+  private zombieIntermission = false; // true between waves
+  private zombieIntermissionTimer = 0;
+
   constructor(lobbyPlayers: LobbyPlayer[], map: MapData, emitCallback: SimEventCallback, modeCfg?: GameModeConfig) {
     this.map = map;
     this.emitCallback = emitCallback;
@@ -216,12 +227,20 @@ export class Sim {
         });
       }
     }
+    if (this.modeCfg.mode === 'zombieApocalypse') {
+      // Open with a short intermission so freshly-spawned humans get a moment
+      // to orient before the first horde drips in.
+      this.zombieIntermission = true;
+      this.zombieIntermissionTimer = ZOMBIE_WAVE_INTERMISSION_S;
+    }
     for (const lp of lobbyPlayers) this.addPlayer(lp.id, lp.name);
   }
 
   // Pick the team with the fewest current humans+bots. Ties go to red so
-  // a solo player always lands on red (and bots fill blue).
+  // a solo player always lands on red (and bots fill blue). Zombie apocalypse
+  // is co-op — everyone joins as a human (red) and only flips to blue on death.
   private nextTeamAssignment(): TeamId {
+    if (this.modeCfg.mode === 'zombieApocalypse') return 'red';
     let red = 0, blue = 0;
     for (const p of this.players.values()) {
       if (p.team === 'red') red++;
@@ -536,21 +555,32 @@ export class Sim {
     if (skill === 'vitality') p.hp = p.maxHp;
   }
 
-  // Multipliers for damage. Pulled here so sim.ts has a single source of truth.
-  // Aggression potion stacks multiplicatively on top of the passive damage stat
-  // and the skill-tree bonus while its timer is positive.
-  private aggressionMul(p: PlayerState): number {
-    return p.aggressionTimer > 0 ? (1 + AGGRESSION_DAMAGE_BONUS) : 1;
+  // Linear-net damage model.
+  //
+  // Outgoing and incoming buffs both contribute additively to a single per-side
+  // bucket — `atkBonus` for the attacker, `defReduction` for the target. The
+  // final per-hit multiplier is `max(DAMAGE_FLOOR, 1 + atkBonus - defReduction)`,
+  // applied once. No multiplicative stacking, no per-source caps.
+  //
+  // This makes offense and defense direct counters in the same units: an
+  // aggression potion (+0.5) cancels a resistant potion (-0.5) exactly. The
+  // 0.05 floor purely prevents the negative-damage healing bug.
+
+  private attackBonus(attacker: PlayerState, isMelee: boolean): number {
+    const skillBonus = isMelee
+      ? (attacker.skills.meleeDamage ?? 0) * SKILL_DEFS.meleeDamage.perTier
+      : (attacker.skills.gunDamage   ?? 0) * SKILL_DEFS.gunDamage.perTier;
+    const aggression = attacker.aggressionTimer > 0 ? AGGRESSION_DAMAGE_BONUS : 0;
+    return attacker.damageBoost + skillBonus + aggression;
   }
-  private meleeDamageMultiplier(p: PlayerState): number {
-    return (1 + p.damageBoost)
-      * (1 + (p.skills.meleeDamage ?? 0) * SKILL_DEFS.meleeDamage.perTier)
-      * this.aggressionMul(p);
-  }
-  private gunDamageMultiplier(p: PlayerState): number {
-    return (1 + p.damageBoost)
-      * (1 + (p.skills.gunDamage ?? 0) * SKILL_DEFS.gunDamage.perTier)
-      * this.aggressionMul(p);
+
+  // Sum of all defensive reductions on the target. Block contribution is
+  // computed by the caller (it depends on what the target is wielding) and
+  // passed in.
+  private defReduction(target: PlayerState, blockBonus: number): number {
+    const resilience = (target.skills.resilience ?? 0) * SKILL_DEFS.resilience.perTier;
+    const resistant = target.resistantTimer > 0 ? RESISTANT_REDUCTION : 0;
+    return target.armor + resilience + resistant + blockBonus;
   }
 
   switchWeapon(playerId: string, slot: number): void {
@@ -728,6 +758,7 @@ export class Sim {
     this.processControlZones();
     this.processCaptureFlag();
     this.processCaptureArena();
+    this.processZombieWaves();
     this.processTimers();
     this.decayHitFlashes();
 
@@ -995,7 +1026,9 @@ export class Sim {
     const ay = attacker.y + Math.sin(attacker.angle) * (PLAYER_RADIUS + 5);
     const meleeArc = Math.PI / 2;
 
-    const dmg = wDef.damage * this.meleeDamageMultiplier(attacker);
+    // Pass raw weapon damage — `damagePlayer` / `damageNPC` apply the
+    // attacker's bucket and the target's reductions in one place.
+    const baseDmg = wDef.damage;
 
     for (const [pid, target] of this.players) {
       if (pid === attacker.id || !target.alive) continue;
@@ -1008,7 +1041,7 @@ export class Sim {
       while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
       if (Math.abs(angleDiff) > meleeArc / 2) continue;
 
-      this.damagePlayer(target, dmg, attacker.id, attacker.name, wDef.type);
+      this.damagePlayer(target, baseDmg, attacker.id, attacker.name, wDef.type);
       if (wDef.knockback) {
         const dir = normalize({ x: target.x - attacker.x, y: target.y - attacker.y });
         target.x += dir.x * wDef.knockback;
@@ -1027,7 +1060,7 @@ export class Sim {
       while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
       if (Math.abs(angleDiff) > meleeArc / 2) continue;
 
-      this.damageNPC(npc, dmg, attacker);
+      this.damageNPC(npc, baseDmg, attacker, true);
       if (wDef.knockback) {
         const dir = normalize({ x: npc.x - attacker.x, y: npc.y - attacker.y });
         npc.x += dir.x * wDef.knockback;
@@ -1053,7 +1086,9 @@ export class Sim {
         y: attacker.y + Math.sin(angle) * (PLAYER_RADIUS + 5),
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
-        damage: wDef.damage * this.gunDamageMultiplier(attacker),
+        // Carry raw weapon damage on the projectile; the attacker bucket
+        // is applied at impact (look up by ownerId in damagePlayer / explodeAt).
+        damage: wDef.damage,
         maxRange: wDef.range,
         distTraveled: 0,
         weapon: wDef.type,
@@ -1089,7 +1124,7 @@ export class Sim {
       if (d > radius + NPC_RADIUS) continue;
       const falloff = Math.max(0.3, 1 - d / radius);
       const dmg = baseDamage * falloff;
-      if (attacker) this.damageNPC(npc, dmg, attacker);
+      if (attacker) this.damageNPC(npc, dmg, attacker, false);
       const dir = normalize({ x: npc.x - x, y: npc.y - y });
       npc.x += dir.x * 8;
       npc.y += dir.y * 8;
@@ -1174,7 +1209,7 @@ export class Sim {
               if (proj.explosionRadius && proj.explosionRadius > 0) {
                 this.explodeAt(proj.x, proj.y, proj.ownerId, proj.damage, proj.explosionRadius, projWeapon);
               } else if (attacker) {
-                this.damageNPC(npc, proj.damage, attacker);
+                this.damageNPC(npc, proj.damage, attacker, false);
                 const dir = normalize({ x: proj.vx, y: proj.vy });
                 npc.x += dir.x * 3;
                 npc.y += dir.y * 3;
@@ -1216,37 +1251,52 @@ export class Sim {
 
   private damagePlayer(target: PlayerState, rawDamage: number, attackerId: string, attackerName: string, weapon: WeaponType): void {
     const incomingMelee = !!WEAPON_DEFS[weapon]?.melee;
-    let dmg = rawDamage;
+    const attacker = this.players.get(attackerId);
 
-    // 1. Block: target is right-click blocking with a melee weapon.
+    // Friendly fire is off in every team mode (CTF, Arena, Zombie Apocalypse).
+    // NPC attackers aren't in the players map so they always fall through.
+    if (attacker && attacker.id !== target.id && isTeamMode(this.modeCfg.mode)
+        && attacker.team === target.team) {
+      return;
+    }
+
+    // Linear-net pipeline:
+    //   atkBonus  - additive sum of attacker offensive %s
+    //   defReduction - additive sum of target defensive %s, including block
+    //   mul = max(DAMAGE_FLOOR, 1 + atkBonus - defReduction)
+    //   dmg = rawDamage * mul
+    //
+    // Block also chips the blocker's weapon durability based on what it
+    // contributes to the bucket — preserving the "tankier weapon = lasts
+    // longer" feel from the old subtractive block.
+    const atkBonus = attacker ? this.attackBonus(attacker, incomingMelee) : 0;
+
+    let blockBonus = 0;
+    let blockingWeapon: { wDef: WeaponDef; slotIdx: number } | null = null;
     if (target.blocking && target.currentWeapon !== 'bandage') {
       const wDef = WEAPON_DEFS[target.currentWeapon];
       if (wDef?.melee) {
-        const blockEff = wDef.blockEfficiency ?? 0;
-        const absorbed = dmg * blockEff;
-        dmg -= absorbed;
-        // Durability cost: -1 (fists) means infinite — ignore.
-        if (target.currentDurability > 0) {
-          target.currentDurability = Math.max(0, target.currentDurability - absorbed);
-          const slotIdx = target.inventory.findIndex(s => s.type === target.currentWeapon);
-          if (slotIdx >= 0) target.inventory[slotIdx].durability = target.currentDurability;
-          if (target.currentDurability === 0 && (wDef.meleeHp ?? -1) > 0) {
-            this.breakCurrentWeapon(target);
-          }
-        }
+        blockBonus = wDef.blockEfficiency ?? 0;
+        const slotIdx = target.inventory.findIndex(s => s.type === target.currentWeapon);
+        if (slotIdx >= 0) blockingWeapon = { wDef, slotIdx };
       }
     }
 
-    // 2. Passive armor stat + resilience skill. Each multiplier clamped at
-     // 0.05 so unbounded stat purchases / skill levels never flip damage to
-     // negative (which would heal the target). Combined damage floor: 0.0025x.
-    const resilience = (target.skills.resilience ?? 0) * SKILL_DEFS.resilience.perTier;
-    const armorMul = Math.max(0.05, 1 - target.armor);
-    const resilMul = Math.max(0.05, 1 - resilience);
-    // Resistant potion is an additional incoming-damage multiplier while
-    // active. Same 0.05 floor so a stacked build can't fully nullify hits.
-    const resistantMul = target.resistantTimer > 0 ? Math.max(0.05, 1 - RESISTANT_REDUCTION) : 1;
-    dmg = dmg * armorMul * resilMul * resistantMul;
+    const defRed = this.defReduction(target, blockBonus);
+    const mul = Math.max(DAMAGE_FLOOR, 1 + atkBonus - defRed);
+    let dmg = rawDamage * mul;
+
+    // Block durability: charged against `rawDamage * (1 + atkBonus) * blockEff`
+    // — i.e. the share of the bucket-input damage that block accounts for,
+    // scaled by attacker offense so stronger hits chip more.
+    if (blockingWeapon && target.currentDurability > 0) {
+      const wear = rawDamage * (1 + atkBonus) * blockBonus;
+      target.currentDurability = Math.max(0, target.currentDurability - wear);
+      target.inventory[blockingWeapon.slotIdx].durability = target.currentDurability;
+      if (target.currentDurability === 0 && (blockingWeapon.wDef.meleeHp ?? -1) > 0) {
+        this.breakCurrentWeapon(target);
+      }
+    }
 
     // 3. Equipped armor piece — absorbs portion of matching-type damage.
     if (target.equippedArmor && target.equippedArmor.hp > 0) {
@@ -1373,6 +1423,13 @@ export class Sim {
       }
     }
 
+    // Zombie apocalypse: a dying human becomes a zombie. They keep playing
+    // for the rest of the match — just on the other side of the line.
+    if (this.modeCfg.mode === 'zombieApocalypse' && victim.team === 'red') {
+      victim.team = 'blue';
+      this.emitCallback('zombieInfected', null, { id: victim.id, name: victim.name });
+    }
+
     this.emitCallback('playerKilled', null, {
       killerId, killerName,
       victimId: victim.id, victimName: victim.name,
@@ -1446,32 +1503,50 @@ export class Sim {
   private respawnPlayer(p: PlayerState): void {
     const spawn = this.spawnFor(p.team);
     const pistolDef = WEAPON_DEFS['pistol'];
+
+    // Zombie apocalypse: blue-team players come back as fast, fragile, melee-
+    // only zombie-players. Read the flag once so the loadout block stays
+    // readable.
+    const asZombiePlayer = this.modeCfg.mode === 'zombieApocalypse' && p.team === 'blue';
+
     p.alive = true;
     p.x = spawn.x;
     p.y = spawn.y;
-    p.hp = BASE_PLAYER_HP + (p.level - 1) * HP_PER_LEVEL;
-    p.maxHp = p.hp;
+    if (asZombiePlayer) {
+      p.hp = ZOMBIE_PLAYER_HP;
+      p.maxHp = ZOMBIE_PLAYER_HP;
+    } else {
+      p.hp = BASE_PLAYER_HP + (p.level - 1) * HP_PER_LEVEL;
+      p.maxHp = p.hp;
+    }
     // Spawn protection
     p.shield = 25;
     p.shieldTimer = 2.5;
     p.armor = 0;
-    p.damageBoost = 0;
+    p.damageBoost = asZombiePlayer ? ZOMBIE_PLAYER_DAMAGE_BONUS : 0;
     p.regen = 0;
-    p.speed = BASE_PLAYER_SPEED;
-    p.currentWeapon = 'pistol';
-    p.currentAmmo = pistolDef.maxAmmo;
+    p.speed = asZombiePlayer ? BASE_PLAYER_SPEED * ZOMBIE_PLAYER_SPEED_MUL : BASE_PLAYER_SPEED;
     p.currentDurability = -1;
-    p.inventory = [
-      { type: 'fists', ammo: -1, durability: -1 },
-      { type: 'pistol', ammo: pistolDef.maxAmmo },
-    ];
+    if (asZombiePlayer) {
+      p.currentWeapon = 'fists';
+      p.currentAmmo = -1;
+      p.inventory = [{ type: 'fists', ammo: -1, durability: -1 }];
+    } else {
+      p.currentWeapon = 'pistol';
+      p.currentAmmo = pistolDef.maxAmmo;
+      p.inventory = [
+        { type: 'fists', ammo: -1, durability: -1 },
+        { type: 'pistol', ammo: pistolDef.maxAmmo },
+      ];
+    }
     p.respawnTimer = 0;
     p.equippedArmor = null;
     p.blocking = false;
     p.bandageCooldown = 0;
 
-    // Bots respawn with their preferred starting weapon so they remain interesting opponents.
-    const bot = this.bots.get(p.id);
+    // Bots respawn with their preferred starting weapon so they remain
+    // interesting opponents — but a zombified bot stays a fists-only zombie.
+    const bot = !asZombiePlayer ? this.bots.get(p.id) : null;
     if (bot) {
       const def = WEAPON_DEFS[bot.preferredWeapon];
       // Replace pistol slot with bot's preferred weapon (or add)
@@ -1545,14 +1620,18 @@ export class Sim {
     p.currentDurability = slot.durability ?? -1;
   }
 
-  private damageNPC(npc: InternalNPC, rawDamage: number, attacker: PlayerState): void {
+  private damageNPC(npc: InternalNPC, rawDamage: number, attacker: PlayerState, isMelee: boolean): void {
+    // NPCs have no defensive stats, so the linear-net formula collapses to
+    // `1 + atkBonus`. Floor still applies for parity with player-vs-player.
+    const mul = Math.max(DAMAGE_FLOOR, 1 + this.attackBonus(attacker, isMelee));
+    const dmg = rawDamage * mul;
     // Cap awarded damage at remaining hp so killing a low-hp enemy with a
     // huge rocket doesn't gift inflated XP.
-    const dmgForXP = Math.min(rawDamage, Math.max(0, npc.hp));
-    npc.hp -= rawDamage;
+    const dmgForXP = Math.min(dmg, Math.max(0, npc.hp));
+    npc.hp -= dmg;
     npc.targetId = attacker.id;
     npc.hitFlash = 1;
-    this.emitCallback('damageDealt', null, { id: `npc-${npc.id}`, x: npc.x, y: npc.y, dmg: Math.round(rawDamage), shield: false });
+    this.emitCallback('damageDealt', null, { id: `npc-${npc.id}`, x: npc.x, y: npc.y, dmg: Math.round(dmg), shield: false });
     this.emitCallback('hitConfirmed', attacker.id, {});
 
     if (dmgForXP > 0) this.giveXP(attacker, dmgForXP * XP_PER_DAMAGE);
@@ -1640,8 +1719,11 @@ export class Sim {
 
       let nearestPlayer: PlayerState | null = null;
       let nearestDist = Infinity;
+      const huntHumansOnly = this.modeCfg.mode === 'zombieApocalypse';
       for (const [, p] of this.players) {
         if (!p.alive) continue;
+        // In zombie mode, zombies (NPC and player) only chase humans.
+        if (huntHumansOnly && p.team !== 'red') continue;
         const d = dist(npc, p);
         if (d < nearestDist) { nearestDist = d; nearestPlayer = p; }
       }
@@ -1721,6 +1803,10 @@ export class Sim {
   }
 
   private processNPCSpawning(): void {
+    // Zombie apocalypse runs its own wave-driven spawner — bypass the random
+    // zone-roller entirely so the only NPCs are the wave zombies.
+    if (this.modeCfg.mode === 'zombieApocalypse') return;
+
     this.npcSpawnTimer -= DT;
     if (this.npcSpawnTimer > 0) return;
     this.npcSpawnTimer = NPC_RESPAWN_INTERVAL;
@@ -2171,6 +2257,112 @@ export class Sim {
     }
   }
 
+  // Zombie-apocalypse tick:
+  //   - Drip-spawn the current wave's zombies (capped by MAX_NPCS).
+  //   - Advance to next wave (or victory) when all spawned zombies are dead.
+  //   - Run a brief intermission between waves so humans can shop / heal.
+  //   - End the match if every human is dead — at that point everyone is a
+  //     zombie and there's nothing left to defend.
+  private processZombieWaves(): void {
+    if (this.modeCfg.mode !== 'zombieApocalypse') return;
+    if (this.gameEnded) return;
+
+    // Loss check: every human knocked out (so all surviving players are on
+    // the zombie team). Don't fire while the match is still booting up.
+    let humansAlive = 0;
+    let humansTotal = 0;
+    for (const p of this.players.values()) {
+      if (p.team === 'red') {
+        humansTotal++;
+        if (p.alive) humansAlive++;
+      }
+    }
+    if (humansTotal > 0 && humansAlive === 0 && this.zombieWave > 0) {
+      this.declareTeamWin('blue');
+      return;
+    }
+
+    if (this.zombieIntermission) {
+      this.zombieIntermissionTimer -= DT;
+      if (this.zombieIntermissionTimer <= 0) {
+        // Start the next wave.
+        this.zombieWave++;
+        this.zombieWaveTarget = ZOMBIE_WAVE_BASE_COUNT + ZOMBIE_WAVE_GROWTH * (this.zombieWave - 1);
+        this.zombieSpawnedThisWave = 0;
+        this.zombieSpawnTimer = 0;
+        this.zombieIntermission = false;
+        this.emitCallback('zombieWaveStart', null, { wave: this.zombieWave, count: this.zombieWaveTarget });
+      }
+      return;
+    }
+
+    // Drip-spawn until the wave target is met. Cap on simultaneous NPCs
+    // borrowed from MAX_NPCS — extra zombies queue and spawn as earlier
+    // ones die.
+    if (this.zombieSpawnedThisWave < this.zombieWaveTarget) {
+      this.zombieSpawnTimer -= DT;
+      if (this.zombieSpawnTimer <= 0 && this.npcs.size < MAX_NPCS) {
+        if (this.spawnZombie()) {
+          this.zombieSpawnedThisWave++;
+          this.zombieSpawnTimer = ZOMBIE_WAVE_SPAWN_INTERVAL;
+        } else {
+          // No valid spawn point this tick — try again next tick.
+          this.zombieSpawnTimer = 0.1;
+        }
+      }
+      return;
+    }
+
+    // Wave complete? End-of-wave fires only when the last drip-spawned
+    // zombie has been killed.
+    if (this.npcs.size === 0) {
+      this.emitCallback('zombieWaveComplete', null, { wave: this.zombieWave });
+      if (this.zombieWave >= this.modeCfg.pointTarget) {
+        this.declareTeamWin('red');
+        return;
+      }
+      this.zombieIntermission = true;
+      this.zombieIntermissionTimer = ZOMBIE_WAVE_INTERMISSION_S;
+    }
+  }
+
+  // Picks a random NPC spawn zone and tries up to 10 times to land a 'zombie'
+  // NPC inside it without clipping a wall. Returns false if it gives up so
+  // processZombieWaves can retry on the next tick.
+  private spawnZombie(): boolean {
+    const def = NPC_DEFS['zombie'];
+    const zones = this.map.npcSpawnZones;
+    if (zones.length === 0) return false;
+    const zone = zones[Math.floor(Math.random() * zones.length)];
+
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const x = zone.x + Math.random() * zone.w;
+      const y = zone.y + Math.random() * zone.h;
+
+      let inWall = false;
+      for (const w of this.map.walls) {
+        if (circleRectCollision(x, y, NPC_RADIUS, w.x, w.y, w.w, w.h)) {
+          inWall = true;
+          break;
+        }
+      }
+      if (inWall) continue;
+
+      const npc: InternalNPC = {
+        id: this.nextNPCId++,
+        type: 'zombie', x, y,
+        angle: Math.random() * Math.PI * 2,
+        hp: def.hp,
+        maxHp: def.hp,
+        alive: true,
+        hitFlash: 0,
+      };
+      this.npcs.set(npc.id, npc);
+      return true;
+    }
+    return false;
+  }
+
   // Shared win-resolution path for team modes — emits gameOver with the
   // winning team highlighted in the scoreboard so the UI can call out the
   // result.
@@ -2286,9 +2478,20 @@ export class Sim {
       }
     }
 
+    const zombie = this.modeCfg.mode === 'zombieApocalypse'
+      ? {
+          wave: this.zombieWave,
+          target: this.modeCfg.pointTarget,
+          spawned: this.zombieSpawnedThisWave,
+          waveCount: this.zombieWaveTarget,
+          inIntermission: this.zombieIntermission,
+          intermissionRemaining: Math.max(0, this.zombieIntermissionTimer),
+        }
+      : undefined;
+
     return {
       players, npcs, projectiles, pickups, controlZones, time: this.time,
-      flags, arenas, teamScore,
+      flags, arenas, teamScore, zombie,
     };
   }
 

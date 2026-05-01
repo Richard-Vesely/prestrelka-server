@@ -534,6 +534,10 @@ export const AGGRESSION_DAMAGE_BONUS = 0.5;   // +50 % outgoing damage
 export const AGGRESSION_DURATION = 15;        // seconds
 // Resistant potion: multiplicative incoming-damage reduction, fixed duration.
 export const RESISTANT_REDUCTION = 0.5;       // -50 % incoming damage
+// Hard floor on the per-hit damage multiplier in the linear-net damage model
+// (sim.ts). Prevents the negative-damage healing bug; tune lower (e.g. 0.01)
+// if you want maxed offense to actually shred maxed defense.
+export const DAMAGE_FLOOR = 0.05;
 export const RESISTANT_DURATION = 15;         // seconds
 // 3-bandage pack from the shop. Bandage slots stack so this is just a
 // shorthand for handing the player N doses of the existing bandage item.
@@ -575,6 +579,15 @@ export interface GameState {
   //   captureFlag  — captures per team (whichever hits pointTarget wins).
   //   captureArena — best per-team capture progress over all arenas.
   teamScore: Record<TeamId, number>;
+  // Zombie-apocalypse wave state. Empty wrapper for non-zombie modes.
+  zombie?: {
+    wave: number;            // current wave (1-indexed); 0 before first wave
+    target: number;          // total waves to survive (mirrors pointTarget)
+    spawned: number;         // zombies drip-spawned this wave
+    waveCount: number;       // total zombies expected this wave
+    inIntermission: boolean;
+    intermissionRemaining: number;  // seconds left
+  };
 }
 
 // --- Game modes ---
@@ -586,11 +599,13 @@ export interface GameState {
 //   lastStanding — each player has N lives; last with lives > 0 wins.
 //   lootLord     — first to N lifetime coins (coins earned, never spent) wins.
 
-export type GameMode = 'massacre' | 'lastStanding' | 'lootLord' | 'domination' | 'captureFlag' | 'captureArena';
+export type GameMode = 'massacre' | 'lastStanding' | 'lootLord' | 'domination' | 'captureFlag' | 'captureArena' | 'zombieApocalypse';
 
 // Modes where players are sorted into red/blue at spawn. Non-team modes
 // don't render the team picker / score banner and assign everyone 'red'.
-export const TEAM_MODES: ReadonlyArray<GameMode> = ['captureFlag', 'captureArena'];
+// zombieApocalypse is a team mode too — humans on red, zombies on blue —
+// even though it's co-op rather than team-vs-team.
+export const TEAM_MODES: ReadonlyArray<GameMode> = ['captureFlag', 'captureArena', 'zombieApocalypse'];
 export function isTeamMode(mode: GameMode): boolean {
   return TEAM_MODES.includes(mode);
 }
@@ -610,8 +625,10 @@ export const GAME_MODE_DEFAULTS: Record<GameMode, GameModeConfig> = {
   lastStanding:  { mode: 'lastStanding',  killTarget: -1, livesPerPlayer: 5,  coinTarget: -1,  pointTarget: -1 },
   lootLord:      { mode: 'lootLord',      killTarget: -1, livesPerPlayer: -1, coinTarget: 500, pointTarget: -1 },
   domination:    { mode: 'domination',    killTarget: -1, livesPerPlayer: -1, coinTarget: -1,  pointTarget: 400 },
-  captureFlag:   { mode: 'captureFlag',   killTarget: -1, livesPerPlayer: -1, coinTarget: -1,  pointTarget: 3 },
-  captureArena:  { mode: 'captureArena',  killTarget: -1, livesPerPlayer: -1, coinTarget: -1,  pointTarget: 100 },
+  captureFlag:      { mode: 'captureFlag',      killTarget: -1, livesPerPlayer: -1, coinTarget: -1, pointTarget: 3 },
+  captureArena:     { mode: 'captureArena',     killTarget: -1, livesPerPlayer: -1, coinTarget: -1, pointTarget: 100 },
+  // pointTarget = number of waves humans must survive to win.
+  zombieApocalypse: { mode: 'zombieApocalypse', killTarget: -1, livesPerPlayer: -1, coinTarget: -1, pointTarget: 5 },
 };
 
 export const GAME_MODE_DEFS: Record<GameMode, { name: string; tagline: string; description: string }> = {
@@ -644,6 +661,11 @@ export const GAME_MODE_DEFS: Record<GameMode, { name: string; tagline: string; d
     name: 'Aréna',
     tagline: 'Týmy — obsaď arénu nepřítele od 0 do 100',
     description: 'Červení proti Modrým. Stůj v aréně nepřítele, abys ji obsazoval. Postup nelze otočit. Tým, který obsadí cizí arénu na 100 %, vyhrává.',
+  },
+  zombieApocalypse: {
+    name: 'Zombie apokalypsa',
+    tagline: 'Co-op — přežij vlny zombíků',
+    description: 'Hráči proti zombíkům. Když zemřeš, sám se staneš zombíkem a útočíš na bývalé spoluhráče. Vyhrávají hráči, kteří přežijí všechny vlny.',
   },
 };
 
@@ -721,6 +743,21 @@ export interface ArenaState {
 export const ARENA_CAPTURE_TIME = 60;            // seconds for a single attacker to fully capture
 export const ARENA_PROGRESS_PER_ATTACKER = 100 / ARENA_CAPTURE_TIME;
 
+// --- Zombie Apocalypse tuning ---
+//
+// Humans (red) start with the standard pistol loadout and defend against
+// drip-spawned waves of NPC zombies. When a human dies they flip to blue
+// (zombie team) and respawn as a fast, fragile melee attacker — they keep
+// playing for the rest of the match, just on the other side.
+export const ZOMBIE_WAVE_BASE_COUNT = 6;     // wave 1 spawns this many zombies
+export const ZOMBIE_WAVE_GROWTH = 4;         // each subsequent wave +N
+export const ZOMBIE_WAVE_SPAWN_INTERVAL = 0.7;   // seconds between drip-spawns
+export const ZOMBIE_WAVE_INTERMISSION_S = 12;    // breather between waves to shop / heal
+// Player-zombie loadout — fists only, glass-cannon stat block.
+export const ZOMBIE_PLAYER_HP = 70;
+export const ZOMBIE_PLAYER_SPEED_MUL = 1.35;     // applied to BASE_PLAYER_SPEED
+export const ZOMBIE_PLAYER_DAMAGE_BONUS = 0.5;   // additive into the linear-net atkBonus bucket
+
 // --- Lobby ---
 
 export interface LobbyPlayer {
@@ -778,6 +815,8 @@ export const S2C_EVENTS = [
   'explosion',
   // Team-mode events (captureFlag, captureArena):
   'flagPicked', 'flagDropped', 'flagReturned', 'flagCaptured', 'arenaCaptured',
+  // Zombie-apocalypse lifecycle:
+  'zombieWaveStart', 'zombieWaveComplete', 'zombieInfected',
   'error',
 ] as const;
 
@@ -838,5 +877,10 @@ export interface S2C {
   flagReturned:  { team: TeamId };
   flagCaptured:  { scoringTeam: TeamId; capturedTeam: TeamId; capturerId: string; score: number };
   arenaCaptured: { arenaId: number; capturedTeam: TeamId; scoringTeam: TeamId };
+  // Zombie apocalypse lifecycle. canonical wave state still flows through
+  // gameState.zombie; these are for one-shot UX (notification, sound).
+  zombieWaveStart:    { wave: number; count: number };
+  zombieWaveComplete: { wave: number };
+  zombieInfected:     { id: string; name: string };
   error: { message: string };
 }
