@@ -489,25 +489,25 @@ export class Sim {
     }
   }
 
-  // Splits a coin total into one or more pickup piles, each clamped to
-  // [COIN_PICKUP_MIN, COIN_PICKUP_MAX]. A leftover smaller than MIN ends up
-  // in a single small pile rather than being lost. Used by both NPC kill
-  // drops and player death drops so the cap is enforced everywhere.
-  private spawnCoinPiles(x: number, y: number, total: number): void {
-    let remaining = Math.floor(total);
-    while (remaining > 0) {
-      const max = Math.min(COIN_PICKUP_MAX, remaining);
-      const min = Math.min(COIN_PICKUP_MIN, remaining);
-      const amount = randomInt(min, max);
-      this.spawnPickup({
-        id: this.nextPickupId++,
-        type: 'coins',
-        x: x + randomInRange(-20, 20),
-        y: y + randomInRange(-20, 20),
-        coinAmount: amount,
-      });
-      remaining -= amount;
-    }
+  // Spawns one coin pickup clamped to [COIN_PICKUP_MIN, COIN_PICKUP_MAX].
+  // Bigger drops are scaled DOWN to the cap rather than split — by design,
+  // a single coin grab never pays more than COIN_PICKUP_MAX, even if the
+  // killer or victim was sitting on hundreds. The surplus is just lost.
+  // Smaller drops (NPCs whose def.coinDrop range is below the floor) keep
+  // their natural amount instead of being inflated to MIN.
+  private spawnCoinPickup(x: number, y: number, total: number): void {
+    const t = Math.floor(total);
+    if (t <= 0) return;
+    const max = Math.min(COIN_PICKUP_MAX, t);
+    const min = Math.min(COIN_PICKUP_MIN, t);
+    const amount = randomInt(min, max);
+    this.spawnPickup({
+      id: this.nextPickupId++,
+      type: 'coins',
+      x: x + randomInRange(-20, 20),
+      y: y + randomInRange(-20, 20),
+      coinAmount: amount,
+    });
   }
 
   // Stacks N bandage doses into the player's existing bandage slot, or
@@ -1409,7 +1409,7 @@ export class Sim {
 
     const droppedCoins = Math.floor(victim.coins * COIN_LOSS_ON_DEATH);
     if (droppedCoins > 0) {
-      this.spawnCoinPiles(victim.x, victim.y, droppedCoins);
+      this.spawnCoinPickup(victim.x, victim.y, droppedCoins);
     }
 
     victim.coins -= droppedCoins;
@@ -1666,7 +1666,7 @@ export class Sim {
     this.checkWinCondition();
 
     if (coinDrop > 0) {
-      this.spawnCoinPiles(npc.x, npc.y, coinDrop);
+      this.spawnCoinPickup(npc.x, npc.y, coinDrop);
     }
 
     if (Math.random() < def.weaponDropChance) {

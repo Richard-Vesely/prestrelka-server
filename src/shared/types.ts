@@ -556,9 +556,10 @@ export const HP_POTION_AMOUNT = 50;
 export const MAX_INVENTORY_SLOTS = 9;
 export const INITIAL_INVENTORY_SLOTS = 6;
 export const COIN_LOSS_ON_DEATH = 0.5;
-// Each individual coin pickup is worth a random amount in [MIN, MAX]. When a
-// kill or death drops more than MAX, the dropped value is split into multiple
-// piles so a single rich kill never funnels into one giant coin grab.
+// Hard cap on what any single coin pickup pays out. Big drops (rich player
+// deaths, big-NPC kills) get scaled DOWN to the cap — the surplus is lost,
+// not spread across multiple piles — so no single coin grab ever overshadows
+// the rest of the economy.
 export const COIN_PICKUP_MIN = 15;
 export const COIN_PICKUP_MAX = 30;
 
