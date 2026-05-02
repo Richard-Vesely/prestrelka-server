@@ -8,6 +8,108 @@
 // Přestřelka — Client-side type mirror (from server types.ts)
 // ============================================================
 
+// ============================================================================
+// TUNING — single-source-of-truth for game balance
+// ============================================================================
+// Edit values in this section to retune the game. Every consumer (sim.ts,
+// renderer.ts, network handlers) reads from these constants — no hardcoded
+// balance literals live elsewhere in the codebase.
+//
+// Engine plumbing (tick rate, map size, hitbox radii, spawn intervals) lives
+// further down under "World plumbing" — those don't usually need tweaking.
+// ----------------------------------------------------------------------------
+
+// --- Player base ---
+export const BASE_PLAYER_HP = 100;
+export const BASE_PLAYER_SPEED = 200;
+export const HP_PER_LEVEL = 5;
+export const RESPAWN_TIME = 3;
+export const COIN_LOSS_ON_DEATH = 0.5;
+export const INITIAL_INVENTORY_SLOTS = 6;
+export const MAX_INVENTORY_SLOTS = 9;
+
+// --- XP / leveling ---
+export const XP_PER_LEVEL = [0, 25, 60, 125, 200, 300, 425, 575, 750, 1000];
+export const PLAYER_KILL_XP = 100;
+export const XP_PER_DAMAGE = 0.4;
+
+// --- Damage model (linear-net) ---
+// Per-hit multiplier = max(DAMAGE_FLOOR, 1 + atkBonus - defReduction).
+// Lower the floor to let stacked offense actually shred stacked defense.
+export const DAMAGE_FLOOR = 0.05;
+
+// --- Shop %-stat tiers (Vlastnosti column) ---
+// Each shop tier of an upgrade adds (tier × value). Speed is a movement
+// multiplier; damage / armor feed the linear-net buckets; maxHp / regen are
+// flat HP units. Descriptions in SHOP_ITEMS auto-format from these.
+export const SHOP_TIER = {
+  maxHp:  10,    // +HP per tier
+  speed:  0.10,  // +10 % movement per tier
+  armor:  0.08,  // +8 % defReduction per tier
+  damage: 0.10,  // +10 % atkBonus per tier
+  regen:  1,     // +HP/s per tier
+} as const;
+
+// --- Skill tree per-tier bonuses ---
+// SKILL_DEFS reads these; descriptions auto-format from the value.
+export const SKILL_TIER = {
+  meleeDamage: 0.20,   // +20 % melee damage per tier
+  gunDamage:   0.20,   // +20 % gun damage per tier
+  agility:     0.20,   // +20 % movement per tier
+  vitality:    20,     // +20 max HP per tier (flat)
+  resilience:  0.15,   // +15 % defReduction per tier (softer than offense skills on purpose)
+} as const;
+
+// --- Potions ---
+export const SPEED_BOOST_MULTIPLIER = 1.5;     // legacy; agility potion now uses speedBoostTimer
+export const SPEED_BOOST_DURATION = 15;        // seconds
+export const AGGRESSION_DAMAGE_BONUS = 0.5;    // additive into atkBonus while active
+export const AGGRESSION_DURATION = 15;
+export const RESISTANT_REDUCTION = 0.5;        // additive into defReduction while active
+export const RESISTANT_DURATION = 15;
+
+// --- Bandages ---
+export const BANDAGE_HEAL_AMOUNT = 50;         // HP per dose
+export const BANDAGE_USE_COOLDOWN = 1.0;       // seconds between consecutive uses
+export const BANDAGE_PACK_DOSES = 3;           // doses granted by the shop pack
+
+// --- Coins ---
+// Hard cap on what any single coin pickup pays out. Big drops get scaled
+// DOWN to the cap (surplus is lost) — no single grab pays > MAX.
+export const COIN_PICKUP_MIN = 15;
+export const COIN_PICKUP_MAX = 30;
+
+// --- Domination zones ---
+export const ZONE_CAPTURE_TIME = 3;            // solo seconds to fully capture a neutral zone
+export const ZONE_POINTS_PER_SECOND = 1;
+
+// --- Capture Flag ---
+export const FLAG_PICKUP_RADIUS = 28;
+export const FLAG_RETURN_RADIUS = 28;
+export const FLAG_CAPTURE_RADIUS = 60;
+
+// --- Capture Arena ---
+export const ARENA_CAPTURE_TIME = 60;          // solo seconds to fully capture
+export const ARENA_PROGRESS_PER_ATTACKER = 100 / ARENA_CAPTURE_TIME;
+
+// --- Zombie Apocalypse ---
+export const ZOMBIE_WAVE_BASE_COUNT = 6;       // wave 1 spawns this many
+export const ZOMBIE_WAVE_GROWTH = 4;           // each subsequent wave +N
+export const ZOMBIE_WAVE_SPAWN_INTERVAL = 0.7;
+export const ZOMBIE_WAVE_INTERMISSION_S = 12;
+export const ZOMBIE_PLAYER_HP = 70;
+export const ZOMBIE_PLAYER_SPEED_MUL = 1.35;
+export const ZOMBIE_PLAYER_DAMAGE_BONUS = 0.5;
+
+// Helper used by SHOP_ITEMS / SKILL_DEFS to format percentage descriptions
+// directly from the tuning values above.
+const pct = (v: number) => `${Math.round(v * 100)}`;
+
+// ============================================================================
+// END TUNING block — types and engine plumbing follow
+// ============================================================================
+
+
 // --- Geometry ---
 
 export interface Vec2 { x: number; y: number }
@@ -393,13 +495,13 @@ export interface ShopItemDef {
 // Tier costs are flat: each costs[] entry is the same.
 export const SHOP_ITEMS: Record<ShopItem, ShopItemDef> = {
   // ── Stat upgrades (uncapped) ────────────────────────────
-  // Each %-tier is 10 % so the shop reads as a steady, predictable ramp;
-  // skill tree (~20 % per tier) is the bigger lever per investment.
-  maxHp:        { id: 'maxHp',        name: 'Max HP',          description: '+10 HP',                         maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
-  speed:        { id: 'speed',        name: 'Rychlost',        description: '+10 % rychlosti',                maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
-  armor:        { id: 'armor',        name: 'Pasivní brnění',  description: '-8 % poškození',                 maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
-  damage:       { id: 'damage',       name: 'Poškození',       description: '+10 % poškození',                maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
-  regen:        { id: 'regen',        name: 'Regenerace',      description: '+1 HP/s',                        maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
+  // Per-tier values come from SHOP_TIER in the TUNING block. Skill tree is
+  // the bigger lever per investment; the shop is the steady ramp.
+  maxHp:        { id: 'maxHp',        name: 'Max HP',          description: `+${SHOP_TIER.maxHp} HP`,                         maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
+  speed:        { id: 'speed',        name: 'Rychlost',        description: `+${pct(SHOP_TIER.speed)} % rychlosti`,            maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
+  armor:        { id: 'armor',        name: 'Pasivní brnění',  description: `-${pct(SHOP_TIER.armor)} % poškození`,            maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
+  damage:       { id: 'damage',       name: 'Poškození',       description: `+${pct(SHOP_TIER.damage)} % poškození`,           maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
+  regen:        { id: 'regen',        name: 'Regenerace',      description: `+${SHOP_TIER.regen} HP/s`,                        maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
 
   // ── Ostatní (consumables) ───────────────────────────────
   bandagePack:       { id: 'bandagePack',       name: 'Tři obvazy',       description: '3× obvaz (50 HP/kus)',           maxTier: 1, costs: [100], isConsumable: true,  category: 'items' },
@@ -482,15 +584,7 @@ export const NPC_WEAPON_DROPS: Record<NPCType, NPCDropEntry[]> = {
 };
 
 // --- Leveling ---
-
-// XP needed to reach each level. Index = level (0 unused). Halved twice
-// so leveling is fast — combined with XP_PER_DAMAGE, ~one zombie kill = lvl 2.
-export const XP_PER_LEVEL = [0, 25, 60, 125, 200, 300, 425, 575, 750, 1000];
-export const HP_PER_LEVEL = 5;
-export const PLAYER_KILL_XP = 100;
-// Damage XP: every point of damage you deal grants this much XP, on top of
-// the kill bonus. Makes hitting things feel rewarding even before the kill.
-export const XP_PER_DAMAGE = 0.4;
+// XP_PER_LEVEL / HP_PER_LEVEL / PLAYER_KILL_XP / XP_PER_DAMAGE — moved to TUNING block.
 
 // --- Skill tree (permanent, level-up rewards) ---
 
@@ -504,19 +598,23 @@ export interface SkillDef {
   perTier: number;       // For tooltip math (effect per tier as a 0-1 multiplier or absolute)
 }
 
-// Skill tree: every per-tier bonus is ~20 % of its base unit, so each level
-// up feels meaningful and the picker reads the same way across rows.
+// SKILL_DEFS reads its perTier numbers from the TUNING block at the top of
+// the file — edit SKILL_TIER there to retune. Descriptions auto-format
+// from the value so the picker text stays in sync. (`pct` helper is also
+// in the TUNING block.)
 export const SKILL_DEFS: Record<SkillType, SkillDef> = {
-  meleeDamage: { id: 'meleeDamage', name: 'Boj zblízka', description: '+20 % poškození zblízka',   maxTier: 5, perTier: 0.20 },
-  gunDamage:   { id: 'gunDamage',   name: 'Střelba',     description: '+20 % poškození zbraní',    maxTier: 5, perTier: 0.20 },
-  agility:     { id: 'agility',     name: 'Hbitost',     description: '+20 % rychlosti',           maxTier: 5, perTier: 0.20 },
-  vitality:    { id: 'vitality',    name: 'Vitalita',    description: '+20 maximálního HP',         maxTier: 5, perTier: 20   },
-  // Odolnost intentionally tuned softer than the other skills so a stacked
-  // defense build can't dominate the linear-net pipeline alone.
-  resilience:  { id: 'resilience',  name: 'Odolnost',    description: '−15 % přijatého poškození', maxTier: 5, perTier: 0.15 },
+  meleeDamage: { id: 'meleeDamage', name: 'Boj zblízka', description: `+${pct(SKILL_TIER.meleeDamage)} % poškození zblízka`, maxTier: 5, perTier: SKILL_TIER.meleeDamage },
+  gunDamage:   { id: 'gunDamage',   name: 'Střelba',     description: `+${pct(SKILL_TIER.gunDamage)} % poškození zbraní`,    maxTier: 5, perTier: SKILL_TIER.gunDamage },
+  agility:     { id: 'agility',     name: 'Hbitost',     description: `+${pct(SKILL_TIER.agility)} % rychlosti`,             maxTier: 5, perTier: SKILL_TIER.agility },
+  vitality:    { id: 'vitality',    name: 'Vitalita',    description: `+${SKILL_TIER.vitality} maximálního HP`,                maxTier: 5, perTier: SKILL_TIER.vitality },
+  resilience:  { id: 'resilience',  name: 'Odolnost',    description: `−${pct(SKILL_TIER.resilience)} % přijatého poškození`, maxTier: 5, perTier: SKILL_TIER.resilience },
 };
 
-// --- Game Constants ---
+// --- World plumbing (engine-internal — usually leave alone) ---
+//
+// Balance values (player HP / speed, potions, bandages, coins, etc.) live
+// in the TUNING block at the top of this file. The constants below are
+// engine-internal: tick rate, map dimensions, hit radii, spawn intervals.
 
 export const TICK_RATE = 20;
 export const DT = 1 / TICK_RATE;
@@ -526,53 +624,21 @@ export const PLAYER_RADIUS = 16;
 export const NPC_RADIUS = 16;
 export const PICKUP_RADIUS = 14;
 export const PROJECTILE_RADIUS = 4;
-export const BASE_PLAYER_HP = 100;
-export const BASE_PLAYER_SPEED = 200;
-export const RESPAWN_TIME = 3;
 export const MAX_NPCS = 20;
 export const NPC_RESPAWN_INTERVAL = 5;
 export const SHOP_INTERACT_RADIUS = 60;
 export const PICKUP_COLLECT_RADIUS = 30;
-export const SPEED_BOOST_MULTIPLIER = 1.5;
-export const SPEED_BOOST_DURATION = 15;
-// Aggression potion: multiplicative damage bonus, fixed duration.
-export const AGGRESSION_DAMAGE_BONUS = 0.5;   // +50 % outgoing damage
-export const AGGRESSION_DURATION = 15;        // seconds
-// Resistant potion: multiplicative incoming-damage reduction, fixed duration.
-export const RESISTANT_REDUCTION = 0.5;       // -50 % incoming damage
-// Hard floor on the per-hit damage multiplier in the linear-net damage model
-// (sim.ts). Prevents the negative-damage healing bug; tune lower (e.g. 0.01)
-// if you want maxed offense to actually shred maxed defense.
-export const DAMAGE_FLOOR = 0.05;
-export const RESISTANT_DURATION = 15;         // seconds
-// 3-bandage pack from the shop. Bandage slots stack so this is just a
-// shorthand for handing the player N doses of the existing bandage item.
-export const BANDAGE_PACK_DOSES = 3;
-export const SHIELD_POTION_AMOUNT = 50;
-export const SHIELD_POTION_DURATION = 30;
-export const HP_POTION_AMOUNT = 50;
-// 6 inventory slots = the original 4 + the two extra spots Richard asked for
-// (plus a separate equippedArmor field on PlayerState for the dedicated armor slot).
-// Hard ceiling — keyboard slots are 1-9, so 9 is the highest bindable slot.
-// Players start with INITIAL_INVENTORY_SLOTS and can buy more in the shop.
-export const MAX_INVENTORY_SLOTS = 9;
-export const INITIAL_INVENTORY_SLOTS = 6;
-export const COIN_LOSS_ON_DEATH = 0.5;
-// Hard cap on what any single coin pickup pays out. Big drops (rich player
-// deaths, big-NPC kills) get scaled DOWN to the cap — the surplus is lost,
-// not spread across multiple piles — so no single coin grab ever overshadows
-// the rest of the economy.
-export const COIN_PICKUP_MIN = 15;
-export const COIN_PICKUP_MAX = 30;
-
 // Loot box spawning: every BOX_SPAWN_INTERVAL seconds a box drops at a
 // random valid location, capped at MAX_PICKUP_BOXES live boxes on the map.
 export const BOX_SPAWN_INTERVAL = 12;
 export const MAX_PICKUP_BOXES = 8;
-export const BANDAGE_HEAL_AMOUNT = 50;
-export const BANDAGE_USE_COOLDOWN = 1.0; // seconds between uses
 // Movement speed multiplier while right-click blocking with a melee weapon.
 export const BLOCK_SPEED_MULTIPLIER = 0.45;
+// Legacy constants — referenced by older code paths but not by the current
+// shop catalog. Kept for backwards compatibility with any in-flight saves.
+export const SHIELD_POTION_AMOUNT = 50;
+export const SHIELD_POTION_DURATION = 30;
+export const HP_POTION_AMOUNT = 50;
 
 // --- Game State (broadcast from server) ---
 
@@ -697,10 +763,7 @@ export interface ControlZoneState {
   contenderId: string | null; // who's currently capturing (set when ownerId differs from sole occupant)
 }
 
-// Domination: how many seconds of solo presence to fully capture a neutral
-// zone, plus the points-per-second the owner accrues.
-export const ZONE_CAPTURE_TIME = 3;
-export const ZONE_POINTS_PER_SECOND = 1;
+// ZONE_CAPTURE_TIME / ZONE_POINTS_PER_SECOND — moved to TUNING block.
 
 // --- Team modes: shared map data + state ---
 //
@@ -725,9 +788,7 @@ export interface FlagState {
   atBase: boolean;          // false while carried OR dropped on the ground
 }
 
-export const FLAG_PICKUP_RADIUS = 28;
-export const FLAG_RETURN_RADIUS = 28;
-export const FLAG_CAPTURE_RADIUS = 60;
+// FLAG_PICKUP_RADIUS / FLAG_RETURN_RADIUS / FLAG_CAPTURE_RADIUS — moved to TUNING block.
 
 // Capture Arena: each team has one or more arenas. While alive opposing
 // players stand inside an arena, capture progress for THEIR team rises
@@ -749,26 +810,8 @@ export interface ArenaState {
   progress: Record<TeamId, number>;
 }
 
-// Capture Arena: progress per second contributed by each attacker present.
-// One attacker → ~100 / ARENA_CAPTURE_TIME progress per second. Multiple
-// attackers stack additively (so 2 attackers fill 2× faster).
-export const ARENA_CAPTURE_TIME = 60;            // seconds for a single attacker to fully capture
-export const ARENA_PROGRESS_PER_ATTACKER = 100 / ARENA_CAPTURE_TIME;
-
-// --- Zombie Apocalypse tuning ---
-//
-// Humans (red) start with the standard pistol loadout and defend against
-// drip-spawned waves of NPC zombies. When a human dies they flip to blue
-// (zombie team) and respawn as a fast, fragile melee attacker — they keep
-// playing for the rest of the match, just on the other side.
-export const ZOMBIE_WAVE_BASE_COUNT = 6;     // wave 1 spawns this many zombies
-export const ZOMBIE_WAVE_GROWTH = 4;         // each subsequent wave +N
-export const ZOMBIE_WAVE_SPAWN_INTERVAL = 0.7;   // seconds between drip-spawns
-export const ZOMBIE_WAVE_INTERMISSION_S = 12;    // breather between waves to shop / heal
-// Player-zombie loadout — fists only, glass-cannon stat block.
-export const ZOMBIE_PLAYER_HP = 70;
-export const ZOMBIE_PLAYER_SPEED_MUL = 1.35;     // applied to BASE_PLAYER_SPEED
-export const ZOMBIE_PLAYER_DAMAGE_BONUS = 0.5;   // additive into the linear-net atkBonus bucket
+// ARENA_CAPTURE_TIME / ARENA_PROGRESS_PER_ATTACKER — moved to TUNING block.
+// All ZOMBIE_* constants — moved to TUNING block.
 
 // --- Lobby ---
 

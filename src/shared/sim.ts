@@ -20,7 +20,7 @@ import {
 } from './types.js';
 
 import {
-  WEAPON_DEFS, NPC_DEFS, NPC_WEAPON_DROPS, SHOP_ITEMS, XP_PER_LEVEL, HP_PER_LEVEL,
+  WEAPON_DEFS, NPC_DEFS, NPC_WEAPON_DROPS, SHOP_ITEMS, SHOP_TIER, XP_PER_LEVEL, HP_PER_LEVEL,
   PLAYER_KILL_XP, XP_PER_DAMAGE, DT, PLAYER_RADIUS, NPC_RADIUS,
   PROJECTILE_RADIUS, BASE_PLAYER_HP, BASE_PLAYER_SPEED, RESPAWN_TIME,
   MAX_NPCS, NPC_RESPAWN_INTERVAL, SHOP_INTERACT_RADIUS,
@@ -529,34 +529,36 @@ export class Sim {
     const tier = p.upgrades[upgrade];
     switch (upgrade) {
       case 'maxHp': {
-        const bonus = tier * 10;
+        const bonus = tier * SHOP_TIER.maxHp;
         p.maxHp = BASE_PLAYER_HP + (p.level - 1) * HP_PER_LEVEL + bonus;
-        p.hp = Math.min(p.hp + 10, p.maxHp);
+        p.hp = Math.min(p.hp + SHOP_TIER.maxHp, p.maxHp);
         break;
       }
       case 'speed':
-        p.speed = BASE_PLAYER_SPEED * (1 + 0.10 * tier);
+        p.speed = BASE_PLAYER_SPEED * (1 + SHOP_TIER.speed * tier);
         break;
       case 'armor':
-        p.armor = tier * 0.08;
+        p.armor = tier * SHOP_TIER.armor;
         break;
       case 'damage':
-        p.damageBoost = tier * 0.10;
+        p.damageBoost = tier * SHOP_TIER.damage;
         break;
       case 'regen':
-        p.regen = tier * 1;
+        p.regen = tier * SHOP_TIER.regen;
         break;
     }
   }
 
   private recalcStats(p: PlayerState): void {
-    const hpBonus = p.upgrades.maxHp * 10;
+    const hpBonus = p.upgrades.maxHp * SHOP_TIER.maxHp;
     const vitalityBonus = (p.skills.vitality ?? 0) * SKILL_DEFS.vitality.perTier;
     p.maxHp = BASE_PLAYER_HP + (p.level - 1) * HP_PER_LEVEL + hpBonus + vitalityBonus;
-    p.speed = BASE_PLAYER_SPEED * (1 + 0.10 * p.upgrades.speed) * (1 + (p.skills.agility ?? 0) * SKILL_DEFS.agility.perTier);
-    p.armor = p.upgrades.armor * 0.08;
-    p.damageBoost = p.upgrades.damage * 0.10;
-    p.regen = p.upgrades.regen * 1;
+    p.speed = BASE_PLAYER_SPEED
+      * (1 + SHOP_TIER.speed * p.upgrades.speed)
+      * (1 + (p.skills.agility ?? 0) * SKILL_DEFS.agility.perTier);
+    p.armor = p.upgrades.armor * SHOP_TIER.armor;
+    p.damageBoost = p.upgrades.damage * SHOP_TIER.damage;
+    p.regen = p.upgrades.regen * SHOP_TIER.regen;
   }
 
   // Public method invoked from network adapter when the player buys a skill.
