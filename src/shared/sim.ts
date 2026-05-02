@@ -538,7 +538,7 @@ export class Sim {
         p.speed = BASE_PLAYER_SPEED * (1 + 0.10 * tier);
         break;
       case 'armor':
-        p.armor = tier * 0.10;
+        p.armor = tier * 0.08;
         break;
       case 'damage':
         p.damageBoost = tier * 0.10;
@@ -554,7 +554,7 @@ export class Sim {
     const vitalityBonus = (p.skills.vitality ?? 0) * SKILL_DEFS.vitality.perTier;
     p.maxHp = BASE_PLAYER_HP + (p.level - 1) * HP_PER_LEVEL + hpBonus + vitalityBonus;
     p.speed = BASE_PLAYER_SPEED * (1 + 0.10 * p.upgrades.speed) * (1 + (p.skills.agility ?? 0) * SKILL_DEFS.agility.perTier);
-    p.armor = p.upgrades.armor * 0.10;
+    p.armor = p.upgrades.armor * 0.08;
     p.damageBoost = p.upgrades.damage * 0.10;
     p.regen = p.upgrades.regen * 1;
   }

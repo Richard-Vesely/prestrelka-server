@@ -397,7 +397,7 @@ export const SHOP_ITEMS: Record<ShopItem, ShopItemDef> = {
   // skill tree (~20 % per tier) is the bigger lever per investment.
   maxHp:        { id: 'maxHp',        name: 'Max HP',          description: '+10 HP',                         maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
   speed:        { id: 'speed',        name: 'Rychlost',        description: '+10 % rychlosti',                maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
-  armor:        { id: 'armor',        name: 'Pasivní brnění',  description: '-10 % poškození',                maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
+  armor:        { id: 'armor',        name: 'Pasivní brnění',  description: '-8 % poškození',                 maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
   damage:       { id: 'damage',       name: 'Poškození',       description: '+10 % poškození',                maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
   regen:        { id: 'regen',        name: 'Regenerace',      description: '+1 HP/s',                        maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
 
@@ -511,7 +511,9 @@ export const SKILL_DEFS: Record<SkillType, SkillDef> = {
   gunDamage:   { id: 'gunDamage',   name: 'Střelba',     description: '+20 % poškození zbraní',    maxTier: 5, perTier: 0.20 },
   agility:     { id: 'agility',     name: 'Hbitost',     description: '+20 % rychlosti',           maxTier: 5, perTier: 0.20 },
   vitality:    { id: 'vitality',    name: 'Vitalita',    description: '+20 maximálního HP',         maxTier: 5, perTier: 20   },
-  resilience:  { id: 'resilience',  name: 'Odolnost',    description: '−20 % přijatého poškození', maxTier: 5, perTier: 0.20 },
+  // Odolnost intentionally tuned softer than the other skills so a stacked
+  // defense build can't dominate the linear-net pipeline alone.
+  resilience:  { id: 'resilience',  name: 'Odolnost',    description: '−15 % přijatého poškození', maxTier: 5, perTier: 0.15 },
 };
 
 // --- Game Constants ---
