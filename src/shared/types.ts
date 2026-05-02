@@ -393,10 +393,12 @@ export interface ShopItemDef {
 // Tier costs are flat: each costs[] entry is the same.
 export const SHOP_ITEMS: Record<ShopItem, ShopItemDef> = {
   // ── Stat upgrades (uncapped) ────────────────────────────
-  maxHp:        { id: 'maxHp',        name: 'Max HP',          description: '+20 HP',                         maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
+  // Each %-tier is 10 % so the shop reads as a steady, predictable ramp;
+  // skill tree (~20 % per tier) is the bigger lever per investment.
+  maxHp:        { id: 'maxHp',        name: 'Max HP',          description: '+10 HP',                         maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
   speed:        { id: 'speed',        name: 'Rychlost',        description: '+10 % rychlosti',                maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
-  armor:        { id: 'armor',        name: 'Pasivní brnění',  description: '-15 % poškození',                maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
-  damage:       { id: 'damage',       name: 'Poškození',       description: '+15 % poškození',                maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
+  armor:        { id: 'armor',        name: 'Pasivní brnění',  description: '-10 % poškození',                maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
+  damage:       { id: 'damage',       name: 'Poškození',       description: '+10 % poškození',                maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
   regen:        { id: 'regen',        name: 'Regenerace',      description: '+1 HP/s',                        maxTier: 99, costs: [100], isConsumable: false, category: 'stats' },
 
   // ── Ostatní (consumables) ───────────────────────────────
@@ -502,12 +504,14 @@ export interface SkillDef {
   perTier: number;       // For tooltip math (effect per tier as a 0-1 multiplier or absolute)
 }
 
+// Skill tree: every per-tier bonus is ~20 % of its base unit, so each level
+// up feels meaningful and the picker reads the same way across rows.
 export const SKILL_DEFS: Record<SkillType, SkillDef> = {
-  meleeDamage: { id: 'meleeDamage', name: 'Boj zblízka', description: '+15 % poškození zblízka',  maxTier: 5, perTier: 0.15 },
-  gunDamage:   { id: 'gunDamage',   name: 'Střelba',     description: '+10 % poškození zbraní',    maxTier: 5, perTier: 0.10 },
-  agility:     { id: 'agility',     name: 'Hbitost',     description: '+8 % rychlosti',            maxTier: 5, perTier: 0.08 },
-  vitality:    { id: 'vitality',    name: 'Vitalita',    description: '+15 maximálního HP',         maxTier: 5, perTier: 15   },
-  resilience:  { id: 'resilience',  name: 'Odolnost',    description: '−8 % přijatého poškození',  maxTier: 5, perTier: 0.08 },
+  meleeDamage: { id: 'meleeDamage', name: 'Boj zblízka', description: '+20 % poškození zblízka',   maxTier: 5, perTier: 0.20 },
+  gunDamage:   { id: 'gunDamage',   name: 'Střelba',     description: '+20 % poškození zbraní',    maxTier: 5, perTier: 0.20 },
+  agility:     { id: 'agility',     name: 'Hbitost',     description: '+20 % rychlosti',           maxTier: 5, perTier: 0.20 },
+  vitality:    { id: 'vitality',    name: 'Vitalita',    description: '+20 maximálního HP',         maxTier: 5, perTier: 20   },
+  resilience:  { id: 'resilience',  name: 'Odolnost',    description: '−20 % přijatého poškození', maxTier: 5, perTier: 0.20 },
 };
 
 // --- Game Constants ---
@@ -552,6 +556,11 @@ export const HP_POTION_AMOUNT = 50;
 export const MAX_INVENTORY_SLOTS = 9;
 export const INITIAL_INVENTORY_SLOTS = 6;
 export const COIN_LOSS_ON_DEATH = 0.5;
+// Each individual coin pickup is worth a random amount in [MIN, MAX]. When a
+// kill or death drops more than MAX, the dropped value is split into multiple
+// piles so a single rich kill never funnels into one giant coin grab.
+export const COIN_PICKUP_MIN = 15;
+export const COIN_PICKUP_MAX = 30;
 
 // Loot box spawning: every BOX_SPAWN_INTERVAL seconds a box drops at a
 // random valid location, capped at MAX_PICKUP_BOXES live boxes on the map.

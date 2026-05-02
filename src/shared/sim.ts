@@ -31,6 +31,7 @@ import {
   ZOMBIE_WAVE_BASE_COUNT, ZOMBIE_WAVE_GROWTH,
   ZOMBIE_WAVE_SPAWN_INTERVAL, ZOMBIE_WAVE_INTERMISSION_S,
   ZOMBIE_PLAYER_HP, ZOMBIE_PLAYER_SPEED_MUL, ZOMBIE_PLAYER_DAMAGE_BONUS,
+  COIN_PICKUP_MIN, COIN_PICKUP_MAX,
   MAX_INVENTORY_SLOTS, INITIAL_INVENTORY_SLOTS, COIN_LOSS_ON_DEATH, PICKUP_RADIUS, SKILL_DEFS,
   BOX_LOOT_TABLE, BOX_SPAWN_INTERVAL, MAX_PICKUP_BOXES, BANDAGE_HEAL_AMOUNT,
   BANDAGE_USE_COOLDOWN, BLOCK_SPEED_MULTIPLIER, ARMOR_PIECES,
@@ -488,6 +489,27 @@ export class Sim {
     }
   }
 
+  // Splits a coin total into one or more pickup piles, each clamped to
+  // [COIN_PICKUP_MIN, COIN_PICKUP_MAX]. A leftover smaller than MIN ends up
+  // in a single small pile rather than being lost. Used by both NPC kill
+  // drops and player death drops so the cap is enforced everywhere.
+  private spawnCoinPiles(x: number, y: number, total: number): void {
+    let remaining = Math.floor(total);
+    while (remaining > 0) {
+      const max = Math.min(COIN_PICKUP_MAX, remaining);
+      const min = Math.min(COIN_PICKUP_MIN, remaining);
+      const amount = randomInt(min, max);
+      this.spawnPickup({
+        id: this.nextPickupId++,
+        type: 'coins',
+        x: x + randomInRange(-20, 20),
+        y: y + randomInRange(-20, 20),
+        coinAmount: amount,
+      });
+      remaining -= amount;
+    }
+  }
+
   // Stacks N bandage doses into the player's existing bandage slot, or
   // takes a fresh slot if there's room. Caller pre-checks inventory space
   // for the no-existing-slot case so we never silently lose doses.
@@ -507,19 +529,19 @@ export class Sim {
     const tier = p.upgrades[upgrade];
     switch (upgrade) {
       case 'maxHp': {
-        const bonus = tier * 20;
+        const bonus = tier * 10;
         p.maxHp = BASE_PLAYER_HP + (p.level - 1) * HP_PER_LEVEL + bonus;
-        p.hp = Math.min(p.hp + 20, p.maxHp);
+        p.hp = Math.min(p.hp + 10, p.maxHp);
         break;
       }
       case 'speed':
-        p.speed = BASE_PLAYER_SPEED * (1 + 0.1 * tier);
+        p.speed = BASE_PLAYER_SPEED * (1 + 0.10 * tier);
         break;
       case 'armor':
-        p.armor = tier * 0.15;
+        p.armor = tier * 0.10;
         break;
       case 'damage':
-        p.damageBoost = tier * 0.15;
+        p.damageBoost = tier * 0.10;
         break;
       case 'regen':
         p.regen = tier * 1;
@@ -528,12 +550,12 @@ export class Sim {
   }
 
   private recalcStats(p: PlayerState): void {
-    const hpBonus = p.upgrades.maxHp * 20;
+    const hpBonus = p.upgrades.maxHp * 10;
     const vitalityBonus = (p.skills.vitality ?? 0) * SKILL_DEFS.vitality.perTier;
     p.maxHp = BASE_PLAYER_HP + (p.level - 1) * HP_PER_LEVEL + hpBonus + vitalityBonus;
-    p.speed = BASE_PLAYER_SPEED * (1 + 0.1 * p.upgrades.speed) * (1 + (p.skills.agility ?? 0) * SKILL_DEFS.agility.perTier);
-    p.armor = p.upgrades.armor * 0.15;
-    p.damageBoost = p.upgrades.damage * 0.15;
+    p.speed = BASE_PLAYER_SPEED * (1 + 0.10 * p.upgrades.speed) * (1 + (p.skills.agility ?? 0) * SKILL_DEFS.agility.perTier);
+    p.armor = p.upgrades.armor * 0.10;
+    p.damageBoost = p.upgrades.damage * 0.10;
     p.regen = p.upgrades.regen * 1;
   }
 
@@ -1387,13 +1409,7 @@ export class Sim {
 
     const droppedCoins = Math.floor(victim.coins * COIN_LOSS_ON_DEATH);
     if (droppedCoins > 0) {
-      this.spawnPickup({
-        id: this.nextPickupId++,
-        type: 'coins',
-        x: victim.x + randomInRange(-20, 20),
-        y: victim.y + randomInRange(-20, 20),
-        coinAmount: droppedCoins,
-      });
+      this.spawnCoinPiles(victim.x, victim.y, droppedCoins);
     }
 
     victim.coins -= droppedCoins;
@@ -1650,13 +1666,7 @@ export class Sim {
     this.checkWinCondition();
 
     if (coinDrop > 0) {
-      this.spawnPickup({
-        id: this.nextPickupId++,
-        type: 'coins',
-        x: npc.x + randomInRange(-15, 15),
-        y: npc.y + randomInRange(-15, 15),
-        coinAmount: coinDrop,
-      });
+      this.spawnCoinPiles(npc.x, npc.y, coinDrop);
     }
 
     if (Math.random() < def.weaponDropChance) {
