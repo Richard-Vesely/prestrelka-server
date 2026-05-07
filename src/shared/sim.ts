@@ -234,7 +234,7 @@ export class Sim {
       this.zombieIntermission = true;
       this.zombieIntermissionTimer = ZOMBIE_WAVE_INTERMISSION_S;
     }
-    for (const lp of lobbyPlayers) this.addPlayer(lp.id, lp.name);
+    for (const lp of lobbyPlayers) this.addPlayer(lp.id, lp.name, lp.color);
   }
 
   // Pick the team with the fewest current humans+bots. Ties go to red so
@@ -252,9 +252,12 @@ export class Sim {
 
   // ── Player management ────────────────────────────────────
 
-  addPlayer(id: string, name: string): void {
+  // `preferredColor` is the color the player picked in the waiting room. We
+  // claim it if it's still free; otherwise we fall back to the auto-assigned
+  // palette pick so two players can never share a color in the same sim.
+  addPlayer(id: string, name: string, preferredColor?: string): void {
     const team: TeamId = isTeamMode(this.modeCfg.mode) ? this.nextTeamAssignment() : 'red';
-    const color = this.pickColor();
+    const color = this.claimColor(preferredColor);
     const spawn = this.spawnFor(team);
     const pistolDef = WEAPON_DEFS['pistol'];
     const player: PlayerState = {
@@ -363,6 +366,16 @@ export class Sim {
     const c = '#' + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
     this.usedColors.add(c);
     return c;
+  }
+
+  // Use the lobby-picked color when it's still free; otherwise fall back to
+  // the next palette slot so two players don't end up sharing a hue.
+  private claimColor(preferred?: string): string {
+    if (preferred && !this.usedColors.has(preferred)) {
+      this.usedColors.add(preferred);
+      return preferred;
+    }
+    return this.pickColor();
   }
 
   private randomSpawnPoint(): Vec2 {

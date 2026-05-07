@@ -69,6 +69,20 @@ io.on('connection', (socket) => {
     if (room) io.to(room.code).emit('roomUpdated', room satisfies S2C['roomUpdated']);
   });
 
+  socket.on('selectColor', (data: C2S['selectColor']) => {
+    if (!data?.color) return;
+    const room = lobby.setColor(socket.id, data.color);
+    if (room) io.to(room.code).emit('roomUpdated', room satisfies S2C['roomUpdated']);
+  });
+
+  socket.on('returnToLobby', () => {
+    const code = lobby.getRoomCodeByPlayer(socket.id);
+    if (!code) return;
+    games.stopGame(code);
+    const room = lobby.returnToLobby(code);
+    if (room) io.to(code).emit('roomUpdated', room satisfies S2C['roomUpdated']);
+  });
+
   socket.on('startGame', (data?: { mode?: GameModeConfig }) => {
     const roomCode = lobby.getRoomCodeByPlayer(socket.id);
     if (!roomCode) {

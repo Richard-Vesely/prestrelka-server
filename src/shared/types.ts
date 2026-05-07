@@ -815,10 +815,19 @@ export interface ArenaState {
 
 // --- Lobby ---
 
+// Palette offered to players in the waiting room. Order matters: when a new
+// player joins, we hand them the first unused color from this list. The
+// 'random' fallback only fires once all 10 are taken.
+export const LOBBY_PLAYER_COLORS = [
+  '#e74c3c', '#3498db', '#2ecc71', '#f1c40f', '#9b59b6',
+  '#e67e22', '#1abc9c', '#e84393', '#00cec9', '#fd79a8',
+] as const;
+
 export interface LobbyPlayer {
   id: string;
   name: string;
   ready: boolean;
+  color: string;
 }
 
 export interface RoomInfo {
@@ -851,7 +860,7 @@ export interface PlayerInput {
 // Client -> Server
 export const C2S_EVENTS = [
   'createRoom', 'joinRoom', 'playerReady', 'startGame', 'leaveRoom',
-  'updateRoomSettings',
+  'updateRoomSettings', 'selectColor', 'returnToLobby',
   'input', 'purchase', 'switchWeapon', 'spendSkill', 'dropWeapon',
   // B toggles lock on the currently-equipped slot. F asks the server to
   // swap the closest in-range pickup with the held slot when inventory's full.
@@ -884,6 +893,8 @@ export interface C2S {
   playerReady: {};
   startGame: {};
   updateRoomSettings: { mode: GameModeConfig };
+  selectColor: { color: string };
+  returnToLobby: {};
   leaveRoom: {};
   input: PlayerInput;
   purchase: { item: ShopItem };
