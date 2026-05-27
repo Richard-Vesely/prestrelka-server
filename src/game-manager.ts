@@ -8,7 +8,7 @@ import { createMap } from './shared/map.js';
 import type {
   LobbyPlayer, GameModeConfig, S2C, PlayerInput, ShopItem, SkillType,
 } from './shared/types.js';
-import { TICK_RATE, GAME_MODE_DEFAULTS } from './shared/types.js';
+import { TICK_RATE, GAME_MODE_DEFAULTS, isTeamMode } from './shared/types.js';
 
 export class GameManager {
   private sims = new Map<string, Sim>();
@@ -37,10 +37,14 @@ export class GameManager {
     this.io.to(roomCode).emit('gameStart', { map, mode: modeCfg } satisfies S2C['gameStart']);
 
     // Bots — keep the in-game economy populated so XP and weapon drops feel
-    // the same as solo. Same call solo mode makes.
-    sim.addBot('Bot Alfa', 'easy');
-    sim.addBot('Bot Beta', 'normal');
-    sim.addBot('Bot Gamma', 'normal');
+    // the same as solo. FFA modes only: team modes (Vlajka/Aréna/Zombie) are
+    // real-players-only so bots don't lopside team balance or fumble the
+    // flag/arena objectives. Solo still adds bots in every mode (local-adapter).
+    if (!isTeamMode(modeCfg.mode)) {
+      sim.addBot('Bot Alfa', 'easy');
+      sim.addBot('Bot Beta', 'normal');
+      sim.addBot('Bot Gamma', 'normal');
+    }
 
     // One tick + one state broadcast per period. Sim is browser-free so
     // setInterval is fine here.

@@ -1544,19 +1544,25 @@ export class Sim {
     p.x = spawn.x;
     p.y = spawn.y;
     if (asZombiePlayer) {
+      // Zombie-players get fixed zombie stats, not the human skill loadout.
       p.hp = ZOMBIE_PLAYER_HP;
       p.maxHp = ZOMBIE_PLAYER_HP;
+      p.armor = 0;
+      p.damageBoost = ZOMBIE_PLAYER_DAMAGE_BONUS;
+      p.regen = 0;
+      p.speed = BASE_PLAYER_SPEED * ZOMBIE_PLAYER_SPEED_MUL;
     } else {
-      p.hp = BASE_PLAYER_HP + (p.level - 1) * HP_PER_LEVEL;
-      p.maxHp = p.hp;
+      // Shop stat-upgrades were wiped on death (see killPlayer), but the
+      // permanent skill tree (agility → speed, vitality → maxHp) persists.
+      // Recalc from skills + the now-zeroed upgrades so a respawned player
+      // keeps their earned speed/HP instead of snapping back to raw base
+      // until their next level-up.
+      this.recalcStats(p);
+      p.hp = p.maxHp;
     }
     // Spawn protection
     p.shield = 25;
     p.shieldTimer = 2.5;
-    p.armor = 0;
-    p.damageBoost = asZombiePlayer ? ZOMBIE_PLAYER_DAMAGE_BONUS : 0;
-    p.regen = 0;
-    p.speed = asZombiePlayer ? BASE_PLAYER_SPEED * ZOMBIE_PLAYER_SPEED_MUL : BASE_PLAYER_SPEED;
     p.currentDurability = -1;
     if (asZombiePlayer) {
       p.currentWeapon = 'fists';
